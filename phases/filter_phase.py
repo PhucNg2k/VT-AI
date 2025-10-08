@@ -72,6 +72,11 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
             candidates.append(cand)
 
         if not candidates:
+            # Fallback: no valid detections in ROI for this image.
+            # Use ROI center with default depth=1000 and no det.
+            rx, ry, rw, rh = ROI
+            fallback_center = (float(rx + rw * 0.5), float(ry + rh * 0.5))
+            selected.append((image_path, fallback_center, 1000.0, {}))
             continue
 
         # sort by depth ascending (smaller depth => closer to camera => top-most)
