@@ -17,62 +17,79 @@ import json
 from typing import List, Dict, Any, Tuple
 import os
 import numpy as np
+import cv2
 
-from config import ROI, HEIGHT_TOL_MM, ROBOT_POS
-from coord_utils import in_roi, dist_from_robot, bbox_center_from_xywhr, bbox_center_from_polygon
-from file_utils import get_depth_pixel
+from Code.config import ROI, HEIGHT_TOL_MM, ROBOT_POS
+from Code.coord_utils import in_roi, dist_from_robot, bbox_center_from_xywhr, bbox_center_from_polygon
+from Code.file_utils import get_depth_pixel
 
 
-def select_topmost_detection(dets: List[Dict[str, Any]], split: str = 'train') -> Tuple[Tuple[float, float], float, Dict[str, Any]]:
+def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -> List[Tuple[str, Tuple[float, float], float, Dict[str, Any]]]:
     """
-    Return (center_uv, depth_mm, det_dict) according to rules.
+    For each image, select one detection by rules and return a list of
+    (image_path, center_uv, depth_mm, det_dict).
+    Rules per image:
     - Filter by ROI using center.
     - Retrieve depth at center.
     - Choose min depth (top-most). If within HEIGHT_TOL_MM, pick farthest from ROBOT_POS.
     """
-    candidates = []
+    # Group detections by image
+    by_image: Dict[str, List[Dict[str, Any]]] = {}
     for d in dets:
-        if "center" in d and d["center"] is not None:
-            cx, cy = d["center"]
-        elif "xywhr" in d:
-            cx, cy = bbox_center_from_xywhr(d["xywhr"])  # fallback
-        elif "polygon" in d:
-            cx, cy = bbox_center_from_polygon(d["polygon"])  # fallback
+        img = d.get("image_path", "")
+        if not img:
+            continue
+        by_image.setdefault(img, []).append(d)
+
+    selected: List[Tuple[str, Tuple[float, float], float, Dict[str, Any]]] = []
+    print("By image:", len(by_image))
+    for image_path, det_list in by_image.items():
+        candidates = []
+        print("Det list:", len(det_list))
+        for d in det_list:
+            if not isinstance(d.get("center"), (list, tuple)) or len(d["center"]) != 2:
+                print("Center not found:", d)
+                continue
+            cx, cy = float(d["center"][0]), float(d["center"][1])
+            if not in_roi((cx, cy), ROI):
+                #print("Center not in ROI:", d)
+                continue
+            print("Center Seletecd:", (cx, cy))
+
+            depth_mm = get_depth_pixel(image_path, (cx, cy), set=split)
+            if depth_mm is None or float(depth_mm) <= 0:
+                print("Depth mm not found:", depth_mm)
+                continue
+            print("Depth mm:", depth_mm)
+            
+            cand = {
+                "center": (cx, cy),
+                "depth": float(depth_mm),
+                "dist_robot": dist_from_robot((cx, cy), ROBOT_POS),
+                "det": d
+            }
+            print("Candidate:", cand)
+            candidates.append(cand)
+
+        if not candidates:
+            continue
+
+        # sort by depth ascending (smaller depth => closer to camera => top-most)
+        candidates.sort(key=lambda x: x["depth"])  # ascending
+        best = candidates[0]
+
+        # group ties within HEIGHT_TOL_MM
+        top_depth = best["depth"]
+        ties = [c for c in candidates if abs(c["depth"] - top_depth) <= float(HEIGHT_TOL_MM)]
+        if len(ties) == 1:
+            chosen = ties[0]
         else:
-            continue
+            # choose farthest from robot
+            chosen = max(ties, key=lambda x: x["dist_robot"])
 
-        if not in_roi((cx, cy), ROI):
-            continue
+        selected.append((image_path, chosen["center"], chosen["depth"], chosen["det"]))
 
-        image_path = d.get("image_path", "")
-        depth_mm = get_depth_pixel(image_path, (cx, cy), set=split)
-        if depth_mm is None or float(depth_mm) <= 0:
-            continue
-
-        candidates.append({
-            "center": (cx, cy),
-            "depth": float(depth_mm),
-            "dist_robot": dist_from_robot((cx, cy), ROBOT_POS),
-            "det": d
-        })
-
-    if not candidates:
-        return None, None, None
-
-    # sort by depth ascending (smaller depth => closer to camera => top-most)
-    candidates.sort(key=lambda x: x["depth"])  # ascending
-    best = candidates[0]
-
-    # group ties within HEIGHT_TOL_MM
-    top_depth = best["depth"]
-    ties = [c for c in candidates if abs(c["depth"] - top_depth) <= float(HEIGHT_TOL_MM)]
-    if len(ties) == 1:
-        chosen = ties[0]
-    else:
-        # choose farthest from robot
-        chosen = max(ties, key=lambda x: x["dist_robot"])
-
-    return chosen["center"], chosen["depth"], chosen["det"]
+    return selected
 
 
 def load_detections_json(json_path: str) -> List[Dict[str, Any]]:
@@ -81,7 +98,36 @@ def load_detections_json(json_path: str) -> List[Dict[str, Any]]:
 
 
 if __name__ == "__main__":
-    dets_path = os.path.join("exp", "detections_train.json")
+    dets_path = os.path.join(os.path.dirname(__file__), "exp", "detections_train.json")
+    print("Loading detections from:", dets_path)
     dets = load_detections_json(dets_path)
-    center, depth_mm, det = select_topmost_detection(dets, split='train')
-    print("Selected center:", center, "depth(mm):", depth_mm)
+    print("Loaded detections:", len(dets))
+
+    selections = select_topmost_per_image(dets, split='train')
+    print("Num images with selection:", len(selections))
+
+    # visualize each selected detection on its corresponding image
+    os.makedirs("exp", exist_ok=True)
+    for image_path, center, depth_mm, det in selections:
+        if det is None or center is None:
+            continue
+        if not (isinstance(det.get("bbox_xyxy", []), list) and len(det["bbox_xyxy"]) == 4):
+            continue
+        if not os.path.isfile(image_path):
+            print("Image path not found:", image_path)
+            continue
+        img = cv2.imread(image_path)
+        if img is None:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in det["bbox_xyxy"]]
+        cx, cy = int(center[0]), int(center[1])
+        # draw bbox and center
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(img, (cx, cy), 5, (0, 0, 255), -1)
+        label = f"depth={depth_mm:.1f}mm"
+        cv2.putText(img, label, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        out_path = os.path.join(os.path.dirname(__file__), "exp", f"vis_selected_{base}.png")
+        cv2.imwrite(out_path, img)
+        print("Saved visualization to:", out_path)

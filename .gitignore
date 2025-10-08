@@ -3,3 +3,8 @@ __pycache__
 augmented_data*
 
 checkpoint*
+
+*.zip
+*data
+
+phases/exp*

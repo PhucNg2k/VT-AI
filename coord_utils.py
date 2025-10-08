@@ -1,6 +1,10 @@
 from typing import Tuple, List
 import numpy as np
-from config import ROI, ROBOT_POS
+
+try:
+    from Code.config import ROI, ROBOT_POS
+except ImportError:
+    from config import ROI, ROBOT_POS
 
 
 def in_roi(point_uv: Tuple[float, float], roi: Tuple[int, int, int, int] = ROI) -> bool:
@@ -13,6 +17,8 @@ def dist_from_robot(point_uv: Tuple[float, float], robot_uv: Tuple[float, float]
     du = float(point_uv[0]) - float(robot_uv[0])
     dv = float(point_uv[1]) - float(robot_uv[1])
     return float(np.hypot(du, dv))
+
+
 
 
 def bbox_center_from_xywhr(xywhr: List[float]) -> Tuple[float, float]:

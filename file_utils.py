@@ -4,6 +4,12 @@ try:
 except ImportError:
     from config import *
 
+# Import depth lookup utility
+try:
+    from Code.camera_config import get_depth_at_color_pixel
+except ImportError:
+    from camera_config import get_depth_at_color_pixel
+
 # 2D: image
 # 2.5D: depth map
 # 3D: point cloud

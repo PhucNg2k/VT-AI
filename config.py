@@ -1,8 +1,8 @@
 import os
 
 # Resolve data base relative to the repository root (this file is in Code/)
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-PUB_DATA_BASE = os.path.abspath(os.path.join(REPO_ROOT, 'Public data task 3', 'Public data'))
+REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
+PUB_DATA_BASE = os.path.abspath(os.path.join(REPO_ROOT,'Public data'))
 
 PUB_TRAIN_BASE = os.path.join(PUB_DATA_BASE, "Public data train")
 PUB_TEST_BASE = os.path.join(PUB_DATA_BASE, "Public data test")

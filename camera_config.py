@@ -81,7 +81,7 @@ def compute_homogen_transform(cam_coord, tmat):
     return out[:3]
 
 def read_img_np(image_path):
-    img = o3d.io.readImage(image_path)
+    img = o3d.io.read_image(image_path)
     return np.asarray(img)
 
 def get_cam_coord(coord, intrinisic_mat=COLOR_INTRINSIC):
@@ -154,7 +154,7 @@ def project_cam_to_pixel(xyz, intrinsics):
     return np.array([u, v], dtype=np.float64)
 
 
-def get_depth_at_color_pixel(image_name, color_uv, split="train", search_radius=2, return_agg="median"):
+def get_depth_at_color_pixel(image_name, color_uv, split="train", search_radius=2, return_agg="median", match_tol_px: float = 1.0):
     """
     Retrieve depth at a color pixel by projecting nearby depth pixels into color frame.
     - color_uv: (u_c, v_c) in color image coordinates
@@ -171,7 +171,10 @@ def get_depth_at_color_pixel(image_name, color_uv, split="train", search_radius=
         return None
 
     h, w = depth_np.shape[0], depth_np.shape[1]
-    u_c, v_c = int(round(color_uv[0])), int(round(color_uv[1]))
+    u_c_f, v_c_f = float(color_uv[0]), float(color_uv[1])
+    u_c, v_c = int(round(u_c_f)), int(round(v_c_f))
+    if u_c < 0 or v_c < 0 or u_c >= w or v_c >= h:
+        return None
     matches = []
 
     # Precompute transform
@@ -198,12 +201,15 @@ def get_depth_at_color_pixel(image_name, color_uv, split="train", search_radius=
             uv_c = project_cam_to_pixel(X_c, COLOR_INTRINSIC)
             if uv_c is None:
                 continue
-            u_proj, v_proj = int(round(uv_c[0])), int(round(uv_c[1]))
-            if u_proj == u_c and v_proj == v_c:
+            u_proj_f, v_proj_f = float(uv_c[0]), float(uv_c[1])
+            # Accept matches within a pixel tolerance in color space
+            if abs(u_proj_f - u_c_f) <= match_tol_px and abs(v_proj_f - v_c_f) <= match_tol_px:
                 matches.append(z_d)
 
     if not matches:
-        return None
+        # Fallback: take depth directly at target color pixel index (assumes alignment)
+        z_direct = float(depth_np[v_c, u_c])
+        return z_direct if z_direct > 0 else None
 
     if return_agg == 'nearest':
         # Choose the sample whose projected color coords are nearest to (u_c, v_c)

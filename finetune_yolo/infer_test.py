@@ -41,6 +41,9 @@ def draw_detections(img, result) -> None:
     clsi = result.boxes.cls.int() if result.boxes.cls is not None else []
     names = [result.names[c.item()] for c in clsi] if len(clsi) == len(xyxy) else ["obj"] * len(xyxy)
     for i in range(len(xyxy)):
+        # visualize only 'parcel-box' class
+        if i < len(names) and names[i] != 'parcel-box':
+            continue
         x1, y1, x2, y2 = [int(v) for v in xyxy[i].tolist()]
         label = f"{names[i]} {confs[i]:.2f}"
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -52,7 +55,7 @@ def main():
     weights = find_latest_checkpoint(checkpoint_root)
     model = YOLO(weights)
 
-    img_paths: List[str] = get_file_list(RGB_TEST, 5)
+    img_paths: List[str] = get_file_list(RGB_TEST, 10)
     if not img_paths:
         print('No test images found at:', RGB_TEST)
         return
