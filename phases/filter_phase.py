@@ -46,6 +46,7 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
     for image_path, det_list in by_image.items():
         candidates = []
         print("Det list:", len(det_list))
+
         for d in det_list:
             if not isinstance(d.get("center"), (list, tuple)) or len(d["center"]) != 2:
                 print("Center not found:", d)
@@ -54,13 +55,11 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
             if not in_roi((cx, cy), ROI):
                 #print("Center not in ROI:", d)
                 continue
-            print("Center Seletecd:", (cx, cy))
 
             depth_mm = get_depth_pixel(image_path, (cx, cy), set=split)
             if depth_mm is None or float(depth_mm) <= 0:
                 print("Depth mm not found:", depth_mm)
                 continue
-            print("Depth mm:", depth_mm)
             
             cand = {
                 "center": (cx, cy),
@@ -68,7 +67,6 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
                 "dist_robot": dist_from_robot((cx, cy), ROBOT_POS),
                 "det": d
             }
-            print("Candidate:", cand)
             candidates.append(cand)
 
         if not candidates:
@@ -89,8 +87,8 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
         if len(ties) == 1:
             chosen = ties[0]
         else:
-            # choose farthest from robot
-            chosen = max(ties, key=lambda x: x["dist_robot"])
+            # prioritize lower u (x) then lower v (y)
+            chosen = sorted(ties, key=lambda x: (x["center"][0], x["center"][1]))[0]
 
         selected.append((image_path, chosen["center"], chosen["depth"], chosen["det"]))
 

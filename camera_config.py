@@ -81,8 +81,14 @@ def compute_homogen_transform(cam_coord, tmat):
     return out[:3]
 
 def read_img_np(image_path):
-    img = o3d.io.read_image(image_path)
-    return np.asarray(img)
+    # Use OpenCV to read with native bit depth (e.g., 16-bit depth PNG)
+    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    # If color image is provided, convert to grayscale for depth-like handling
+    if len(img.shape) == 3 and img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return img
 
 def get_cam_coord(coord, intrinisic_mat=COLOR_INTRINSIC):
     if not len(coord) == 2:

@@ -8,6 +8,10 @@ checkpoint*
 *data
 
 phases/exp*
-*pt
+*.pt
 
 .DS_Store
+
+submit
+
+*.csv
