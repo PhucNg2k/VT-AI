@@ -9,12 +9,14 @@ try:
     from Code.config import RGB_TEST, RGB_TRAIN
     from Code.file_utils import get_file_list, get_depth_pixel
     from Code.phases.filter_phase import select_topmost_per_image
-    from Code.camera_config import unproject_pixel_to_cam, COLOR_INTRINSIC
+    from Code.camera_config import get_cam_coord, COLOR_INTRINSIC
+    from Code.finetune_yolo.model_utils import detect_in_area_batch, detect_on_original_image
 except ImportError:
     from config import RGB_TEST, RGB_TRAIN
     from file_utils import get_file_list, get_depth_pixel
     from phases.filter_phase import select_topmost_per_image
-    from camera_config import unproject_pixel_to_cam, COLOR_INTRINSIC
+    from camera_config import get_cam_coord, COLOR_INTRINSIC
+    from finetune_yolo.model_utils import detect_in_area_batch, detect_on_original_image
 
 from ultralytics import YOLO
 
@@ -36,77 +38,62 @@ def find_latest_checkpoint(checkpoint_root: str) -> str:
     return cand[0]
 
 
-def run_and_export(output_csv: str) -> None:
+def run_and_export(output_csv: str, split) -> None:
     checkpoint_root = os.path.join(os.path.dirname(__file__), 'checkpoint')
     weights = find_latest_checkpoint(checkpoint_root)
     model = YOLO(weights)
+    
+    print(f"Split: {split}")
+    data_src = RGB_TRAIN if split=='train' else RGB_TEST
 
-    img_paths: List[str] = get_file_list(RGB_TRAIN, -1)
+    img_paths: List[str] = get_file_list(data_src, -1)
     if not img_paths:
-        print('No test images found at:', RGB_TRAIN)
+        print('No images found at:', data_src)
         return
+    print("Data source: ", data_src)
 
     rows: List[dict] = []
-
-    for p in img_paths:
-        # run inference (no need to read image for drawing; YOLO accepts path)
-        results = model(p)
-
-        # Collect detections in our common dict format for current image
-        dets_for_filter = []
-        for res in results:
-            boxes = res.boxes
-            if boxes is None or len(boxes) == 0:
-                continue
-            xyxy = boxes.xyxy
-            confs = boxes.conf.tolist() if boxes.conf is not None else [1.0] * len(xyxy)
-            clsi = boxes.cls.int() if boxes.cls is not None else []
-            names = [res.names[c.item()] for c in clsi] if len(clsi) == len(xyxy) else ["object"] * len(xyxy)
-            for i in range(len(xyxy)):
-                if i < len(names) and names[i] != 'parcel-box':
-                    continue
-                x1, y1, x2, y2 = [float(v) for v in xyxy[i].tolist()]
-                cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
-                dets_for_filter.append({
-                    "image_path": p,
-                    "center": [cx, cy],
-                    "bbox_xyxy": [x1, y1, x2, y2],
-                    "polygon": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
-                    "conf": float(confs[i]) if i < len(confs) else 1.0,
-                    "label": names[i]
-                })
-
+        
+    for image_path in img_paths:
+        dets_for_filter = detect_on_original_image(model, image_path, target_class='parcel-box')
         if not dets_for_filter:
-            # Ensure we get ROI-center fallback from filter
-            print("GOT DEFAULT BBOX IN ROI")
-            dets_for_filter = [{"image_path": p, "center": []}]
+            dets_for_filter = [{"image_path": image_path, "center": []}]
 
-        selections = select_topmost_per_image(dets_for_filter, split='train')
+        selections = select_topmost_per_image(dets_for_filter, split=split)
         
-        # There will be exactly one selection for current image path
-        for img_path, center_uv, depth_sel, det_sel in selections:
-            if img_path != p:
+        if len(selections) == 1:
+            img_path, center_uv, depth_sel, det_sel = selections[0]
+                
+            if img_path != image_path:
+                print("ERROR: Image path not matching")
                 continue
-        
-            # Compute 3D camera coordinates from center_uv and depth
-            x_cam = y_cam = z_cam = 0.0
+            
+            # keep float center for math; ints only for drawing
+            cxf, cyf = float(center_uv[0]), float(center_uv[1])
+            
+            # get 3d camera coord from center (float) -> [x,y,z] in meters
+            xyz_cam = None
             if depth_sel is not None and float(depth_sel) > 0:
-                u_f, v_f = float(center_uv[0]), float(center_uv[1]) # float center 
-                z_m = float(depth_sel) / 1000.0 # meter scale for z
-                xyz = unproject_pixel_to_cam(u_f, v_f, z_m, COLOR_INTRINSIC)
-                if xyz is not None:
-                    x_cam, y_cam, z_cam = float(xyz[0]), float(xyz[1]), float(xyz[2])
+                z_d = float(depth_sel) / 1000.0
+                #xyz = unproject_pixel_to_cam(cxf, cyf, z_m, COLOR_INTRINSIC)
 
+                x_cam, y_cam, _ = get_cam_coord(center_uv, COLOR_INTRINSIC)
+                        
+                xyz_cam = tuple(map(float, (x_cam, y_cam, z_d)))
+                x_cam, y_cam, z_cam = xyz_cam
+    
             # Compose CSV row
-            rows.append({
-                "image_filename": f"image_{os.path.basename(p)}",
-                "x": f"{x_cam:.3f}",
-                "y": f"{y_cam:.3f}",
-                "z": f"{z_cam:.3f}",
-                "Rx": 0,
-                "Ry": 0,
-                "Rz": 1
-            })
+                rows.append({
+                    "image_filename": f"image_{os.path.basename(image_path)}",
+                    "x": f"{x_cam:.3f}",
+                    "y": f"{y_cam:.3f}",
+                    "z": f"{z_cam:.3f}",
+                    "Rx": 0,
+                    "Ry": 0,
+                    "Rz": 1
+                })
+        else:
+            print("INVALID SELECTED RESULT")
 
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     with open(output_csv, "w", newline="") as f:
@@ -117,7 +104,7 @@ def run_and_export(output_csv: str) -> None:
 
 
 if __name__ == "__main__":
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submit_train.csv")
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "train_test.csv")
     print(f"Saving to {out_csv}")
-    run_and_export(out_csv)
+    run_and_export(out_csv, split='train')
 

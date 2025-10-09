@@ -22,66 +22,21 @@ from typing import List, Dict, Any
 from ultralytics import YOLO
 from Code.config import *
 from Code.file_utils import get_file_list
+from Code.finetune_yolo.model_utils import detect_in_area_batch
 
 YOLO_CKPT = "/Users/cybercs/Documents/Competition/Code/finetune_yolo/checkpoint/parcel_yolo11l/weights/best.pt"
 
 
 def run_detection_on_dir(rgb_dir: str, model_path: str = "yolo11l.pt", max_images: int = -1) -> List[Dict[str, Any]]:
+    """
+    Run YOLO detection on images in directory using ROI-based detection.
+    """
     model = YOLO(YOLO_CKPT)
-    detections: List[Dict[str, Any]] = []
-
-    for f_image in get_file_list(rgb_dir, max_images):
-        results = model(f_image)
-        for result in results:
-            boxes = result.boxes  # axis-aligned boxes
-            
-            # If there are no boxes at all, register an empty detection for this image
-            if boxes is None or len(boxes) == 0:
-                detections.append({
-                    "image_path": f_image,
-                    "center": [],
-                    "bbox_xyxy": [],
-                    "polygon": [],
-                    "conf": 0,
-                    "label": None
-                })
-                continue
-            
-            xyxy = boxes.xyxy  # [N, 4]
-            confs = boxes.conf.tolist() if boxes.conf is not None else [1.0] * len(xyxy)
-            clsi = boxes.cls.int() if boxes.cls is not None else []
-            names = [result.names[c.item()] for c in clsi] if len(clsi) == len(xyxy) else ["object"] * len(xyxy)
-
-            # Keep only detections with class 'parcel-box'
-            num_parcel_boxes = 0
-            for i in range(len(xyxy)):
-                if i < len(names) and names[i] != 'parcel-box':
-                    continue
-                x1, y1, x2, y2 = [float(v) for v in xyxy[i].tolist()]
-                cx = 0.5 * (x1 + x2)
-                cy = 0.5 * (y1 + y2)
-                poly = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
-                detections.append({
-                    "image_path": f_image,
-                    "center": [float(cx), float(cy)],
-                    "bbox_xyxy": [x1, y1, x2, y2],
-                    "polygon": [[float(px), float(py)] for px, py in poly],
-                    "conf": float(confs[i]),
-                    "label": names[i]
-                })
-                num_parcel_boxes += 1
-
-            # If there were boxes but none with class 'parcel-box', register an empty detection
-            if num_parcel_boxes == 0:
-                detections.append({
-                    "image_path": f_image,
-                    "center": [],
-                    "bbox_xyxy": [],
-                    "polygon": [],
-                    "conf": 0,
-                    "label": None
-                })
-
+    image_paths = get_file_list(rgb_dir, max_images)
+    
+    # Use the reusable function from model_utils
+    detections = detect_in_area_batch(model, image_paths, target_class='parcel-box')
+    
     return detections
 
 

@@ -51,6 +51,14 @@ T_VECTOR = [
     [0.00041]
 ]
 
+
+PLY_MATRIX = [
+    [1, 0, 0],
+    [0,-1, 0],
+    [0, 0,-1]
+ ]
+
+
 def get_tmat_depth2color():
     R = np.asarray(R_MATRIX, dtype=np.float64)
     t = np.asarray(T_VECTOR, dtype=np.float64).reshape(3, 1)
@@ -116,25 +124,22 @@ def get_pix_coord(coord, initrinsic_mat=DEPTH_INTRINSIC):
     fy = float(initrinsic_mat["fy"]) 
     cx = float(initrinsic_mat["cx"]) 
     cy = float(initrinsic_mat["cy"]) 
+    width = int(initrinsic_mat.get("width", 0))
+    height = int(initrinsic_mat.get("height", 0))
 
-    x, y, z = float(coord[0]), float(coord[1]), float(coord[2])
+    x, y, z = map(float, coord)
     if z == 0:
         return None
 
-    u = x / z * fx + cx
-    v = y / z * fy + cy
+    u = int(x / z * fx + cx)
+    v = int(y / z * fy + cy)
 
-    width = int(initrinsic_mat.get("width", 0))
-    height = int(initrinsic_mat.get("height", 0))
-    u_i = int(round(u))
-    v_i = int(round(v))
+    # Clamp if dimensions are provided
     if width > 0 and height > 0:
-        u_i = max(0, min(width - 1, u_i))
-        v_i = max(0, min(height - 1, v_i))
-    cam_coord = [u_i, v_i]
+        u = max(0, min(width - 1, u))
+        v = max(0, min(height - 1, v))
 
-    if len(cam_coord) == 2:
-        return cam_coord
+    return [u, v]
 
 
 def unproject_pixel_to_cam(u, v, z, intrinsics):
@@ -230,10 +235,10 @@ def get_depth_at_color_pixel(image_name, color_uv, split="train", search_radius=
     # default median
     return float(np.median(matches))
 
-def get_colorpix_depth_value(image_name, pix_coord, split="train"):
+def get_colorpix_depth_value(image_name, color_uv, split="train"):
     '''
         image_name: '0001.png'
-        pix_coord: (200,300) # (x,y)
+        pix_coord: (200,300) # (u,v)
     '''
     
     if split=='train':
@@ -241,7 +246,7 @@ def get_colorpix_depth_value(image_name, pix_coord, split="train"):
     else:
         depth_src = DEPTH_TEST
 
-    color_cam_coord = get_cam_coord(pix_coord, COLOR_INTRINSIC)
+    color_cam_coord = get_cam_coord(color_uv, COLOR_INTRINSIC)
     
     tmat_color2depth = get_tmat_color2depth()
     
@@ -256,8 +261,8 @@ def get_colorpix_depth_value(image_name, pix_coord, split="train"):
     # numpy images index as [row (v), col (u)]
     if v < 0 or u < 0 or v >= depth_np.shape[0] or u >= depth_np.shape[1]:
         return None
-    depth_value = depth_np[v, u]
     
+    depth_value = depth_np[v, u]
     return depth_value
 
 

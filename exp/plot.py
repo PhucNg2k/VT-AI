@@ -17,7 +17,7 @@ def get_pixel_coords(event, x, y, flags, param):
         cv2.imshow('Image Window', img)
 
 # Load the image
-img = cv2.imread(r'../Public data task 3\Public data\Public data train\rgb\0000.png') # Replace 'your_image_file.png' with your file path
+img = cv2.imread(r'../Public data/Public data train/rgb/0000.png') # Replace 'your_image_file.png' with your file path
 
 # Check if the image was loaded successfully
 if img is None:

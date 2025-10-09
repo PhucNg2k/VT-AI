@@ -12,11 +12,13 @@ try:
     from Code.file_utils import get_file_list, get_depth_pixel
     from Code.phases.filter_phase import select_topmost_per_image
     from Code.camera_config import unproject_pixel_to_cam, COLOR_INTRINSIC
+    from Code.finetune_yolo.model_utils import detect_in_area_batch
 except ImportError:
     from config import RGB_TEST, RGB_TRAIN
     from file_utils import get_file_list, get_depth_pixel
     from phases.filter_phase import select_topmost_per_image
     from camera_config import unproject_pixel_to_cam, COLOR_INTRINSIC
+    from finetune_yolo.model_utils import detect_in_area_batch
 
 from ultralytics import YOLO
 
@@ -216,46 +218,33 @@ def run_and_export(output_csv: str) -> None:
     weights = find_latest_checkpoint(checkpoint_root)
     model = YOLO(weights)
 
-    img_paths: List[str] = get_file_list(RGB_TRAIN, -1)
+    img_paths: List[str] = get_file_list(RGB_TEST, -1)
     if not img_paths:
-        print('No test images found at:', RGB_TRAIN)
+        print('No test images found at:', RGB_TEST)
         return
 
     rows: List[dict] = []
 
+    # Use ROI-based detection from model_utils for all images
+    all_detections = detect_in_area_batch(model, img_paths, target_class='parcel-box')
+    
+    # Group detections by image path
+    detections_by_image = {}
+    for det in all_detections:
+        img_path = det["image_path"]
+        if img_path not in detections_by_image:
+            detections_by_image[img_path] = []
+        detections_by_image[img_path].append(det)
+
     for p in img_paths:
-        # run inference (no need to read image for drawing; YOLO accepts path)
-        results = model(p)
-
-        # Collect detections in our common dict format for current image
-        dets_for_filter = []
-        for res in results:
-            boxes = res.boxes
-            if boxes is None or len(boxes) == 0:
-                continue
-            xyxy = boxes.xyxy
-            confs = boxes.conf.tolist() if boxes.conf is not None else [1.0] * len(xyxy)
-            clsi = boxes.cls.int() if boxes.cls is not None else []
-            names = [res.names[c.item()] for c in clsi] if len(clsi) == len(xyxy) else ["object"] * len(xyxy)
-            for i in range(len(xyxy)):
-                if i < len(names) and names[i] != 'parcel-box':
-                    continue
-                x1, y1, x2, y2 = [float(v) for v in xyxy[i].tolist()]
-                cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
-                dets_for_filter.append({
-                    "image_path": p,
-                    "center": [cx, cy],
-                    "bbox_xyxy": [x1, y1, x2, y2],
-                    "polygon": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
-                    "conf": float(confs[i]) if i < len(confs) else 1.0,
-                    "label": names[i]
-                })
-
+        # Get detections for this image
+        dets_for_filter = detections_by_image.get(p, [])
+        
         if not dets_for_filter:
             # Ensure we get ROI-center fallback from filter
             dets_for_filter = [{"image_path": p, "center": []}]
 
-        selections = select_topmost_per_image(dets_for_filter, split='train')
+        selections = select_topmost_per_image(dets_for_filter, split='test')
         
         # There will be exactly one selection for current image path
         for img_path, center_uv, depth_sel, det_sel in selections:
@@ -314,7 +303,7 @@ def run_and_export(output_csv: str) -> None:
 
 
 if __name__ == "__main__":
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submit_train_pcd_hybrid.csv")
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submit_test_pcd_hybrid.csv")
     print(f"Saving to {out_csv}")
     run_and_export(out_csv)
 

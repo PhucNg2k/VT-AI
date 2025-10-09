@@ -34,7 +34,12 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
     - Choose min depth (top-most). If within HEIGHT_TOL_MM, pick farthest from ROBOT_POS.
     """
     # Group detections by image
+    
+    rx, ry, rw, rh = ROI
+    fallback_center = (float(rx + rw * 0.5), float(ry + rh * 0.5))
+    
     by_image: Dict[str, List[Dict[str, Any]]] = {}
+    
     for d in dets:
         img = d.get("image_path", "")
         if not img:
@@ -43,26 +48,28 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
 
     selected: List[Tuple[str, Tuple[float, float], float, Dict[str, Any]]] = []
     print("By image:", len(by_image))
+    
     for image_path, det_list in by_image.items():
         candidates = []
         print("Det list:", len(det_list))
 
         for d in det_list:
-            if not isinstance(d.get("center"), (list, tuple)) or len(d["center"]) != 2:
+            if not isinstance(d.get("center_uv"), (list, tuple)) or len(d["center_uv"]) != 2:
                 print("Center not found:", d)
                 continue
-            cx, cy = float(d["center"][0]), float(d["center"][1])
+            cx, cy = float(d["center_uv"][0]), float(d["center_uv"][1])
             if not in_roi((cx, cy), ROI):
                 #print("Center not in ROI:", d)
                 continue
 
             depth_mm = get_depth_pixel(image_path, (cx, cy), set=split)
+            
             if depth_mm is None or float(depth_mm) <= 0:
                 print("Depth mm not found:", depth_mm)
                 continue
             
             cand = {
-                "center": (cx, cy),
+                "center_uv": (cx, cy),
                 "depth": float(depth_mm),
                 "dist_robot": dist_from_robot((cx, cy), ROBOT_POS),
                 "det": d
@@ -71,9 +78,6 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
 
         if not candidates:
             # Fallback: no valid detections in ROI for this image.
-            # Use ROI center with default depth=1000 and no det.
-            rx, ry, rw, rh = ROI
-            fallback_center = (float(rx + rw * 0.5), float(ry + rh * 0.5))
             selected.append((image_path, fallback_center, 1000.0, {}))
             continue
 
@@ -88,9 +92,10 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
             chosen = ties[0]
         else:
             # prioritize lower u (x) then lower v (y)
-            chosen = sorted(ties, key=lambda x: (x["center"][0], x["center"][1]))[0]
+            chosen = sorted(ties, key=lambda x: (x["center_uv"][0], x["center_uv"][1]))[0]
 
-        selected.append((image_path, chosen["center"], chosen["depth"], chosen["det"]))
+        # (image, chosen_point)
+        selected.append((image_path, chosen["center_uv"], chosen["depth"], chosen["det"]))
 
     return selected
 

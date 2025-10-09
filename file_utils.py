@@ -6,9 +6,9 @@ except ImportError:
 
 # Import depth lookup utility
 try:
-    from Code.camera_config import get_depth_at_color_pixel
+    from Code.camera_config import get_depth_at_color_pixel, get_colorpix_depth_value
 except ImportError:
-    from camera_config import get_depth_at_color_pixel
+    from camera_config import get_depth_at_color_pixel, get_colorpix_depth_value
 
 # 2D: image
 # 2.5D: depth map
@@ -32,4 +32,5 @@ def get_depth_pixel(image_name, pixel_coord, set='train'):
 
     # image_name can be a path or filename. Normalize to filename.
     fname = os.path.basename(image_name)
-    return get_depth_at_color_pixel(fname, pixel_coord, split='train' if set=='train' else 'test', search_radius=2, return_agg='median')
+    #return get_depth_at_color_pixel(fname, pixel_coord, split='train' if set=='train' else 'test', search_radius=2, return_agg='median')
+    return get_colorpix_depth_value(fname, pixel_coord, split='train' if set=='train' else 'test')

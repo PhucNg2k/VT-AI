@@ -97,7 +97,7 @@ def main():
     #pred_csv = sys.argv[1] || "/Users/cybercs/Documents/Competition/Code/finetune_yolo/submit/Submit_train.csv"
     #gt_csv = sys.argv[2] || "/Users/cybercs/Documents/Competition/Code/finetune_yolo/submit/Submit_train_gt.csv"
 
-    pred_csv = "/Users/cybercs/Documents/Competition/Code/finetune_yolo/submit/Submit_train.csv"
+    pred_csv = "/Users/cybercs/Documents/Competition/Code/finetune_yolo/submit/train_test.csv"
 
     gt_csv = "/Users/cybercs/Documents/Competition/Code/finetune_yolo/submit/Public_train_gt.csv"
     try:
