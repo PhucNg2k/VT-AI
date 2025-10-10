@@ -235,12 +235,13 @@ def get_depth_at_color_pixel(image_name, color_uv, split="train", search_radius=
     # default median
     return float(np.median(matches))
 
-def get_colorpix_depth_value(image_name, color_uv, split="train"):
+def get_colorpix_depth_value(image_name, color_uv, direct, split="train"):
     '''
         image_name: '0001.png'
         pix_coord: (200,300) # (u,v)
     '''
-    
+    og_u, og_v = int(color_uv[0]), int(color_uv[1])
+
     if split=='train':
         depth_src = DEPTH_TRAIN
     else:
@@ -255,15 +256,22 @@ def get_colorpix_depth_value(image_name, color_uv, split="train"):
     depth_pix_coord = get_pix_coord(depth_cam_coord, DEPTH_INTRINSIC)
 
     depth_np = read_img_np(os.path.join(depth_src, image_name))
+
+
     if depth_pix_coord is None:
         return None
+    
     u, v = depth_pix_coord[0], depth_pix_coord[1]
+
     # numpy images index as [row (v), col (u)]
     if v < 0 or u < 0 or v >= depth_np.shape[0] or u >= depth_np.shape[1]:
         return None
     
-    depth_value = depth_np[v, u]
-    return depth_value
+    if direct: # exact matching
+        depth_value = depth_np[og_v, og_u]
+    else: 
+        depth_value = depth_np[v, u]
+    return float(depth_value)
 
 
 
@@ -275,6 +283,4 @@ if __name__ == "__main__":
 
     bbox = (560, 150, 860, 480)  # example ROI
 
-    points_3d_color, centroid, uv, colors = bbox_to_color_aligned_patch(depth, bbox, rgb)
-    print(f"Centroid (x,y,z): {centroid}")
-    print(f"Num valid points: {len(points_3d_color)}")
+   

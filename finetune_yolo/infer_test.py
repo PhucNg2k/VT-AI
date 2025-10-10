@@ -39,19 +39,24 @@ def find_latest_checkpoint(checkpoint_root: str) -> str:
     return cand[0]
 
 
-def draw_detections(img, model, image_path: str) -> None:
+def draw_detections(model, image_path: str, split) -> None:
     """
     Draw detections using ROI-based detection from model_utils.
     """
-    split = 'train'
-    print(f"Split: {split}")
     
     # Use ROI-based detection from model_utils
+    img = cv2.imread(image_path)
+    if img is None:
+        print('Failed to read:', image_path)
+        return
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
     dets_for_filter = detect_on_original_image(model, image_path, target_class='parcel-box')
     
     # Draw all detections in GREEN
     for det in dets_for_filter:
-        if not det.get("center") or not det.get("bbox_xyxy"):
+        if not det.get("center_uv") or not det.get("bbox_xyxy"):
             continue
             
         x1f, y1f, x2f, y2f = det["bbox_xyxy"]
@@ -64,9 +69,13 @@ def draw_detections(img, model, image_path: str) -> None:
         
         
         depth_txt = f"{depth_mm:.1f}mm" if depth_mm is not None and float(depth_mm) > 0 else "NA"
-        label = f"{det['label']} {det['conf']:.2f} depth={depth_txt}"
-        #cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        #cv2.putText(img, label, (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+        #label = f"{det['label']} {det['conf']:.2f} depth={depth_txt}"
+        label = f"({cam_x:.3f}, {cam_y:.3f}) depth={depth_txt}"
+        
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(img, label, (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.circle(img, (int(cx), int(cy)), 5, (255, 0, 0), -1)
+
 
     # Overlay filtered selection in RED (always, even if no YOLO boxes)
     if not dets_for_filter:
@@ -91,14 +100,13 @@ def draw_detections(img, model, image_path: str) -> None:
             half = 10
             x1s, y1s, x2s, y2s = cxs - half, cys - half, cxs + half, cys + half
         
-        cv2.rectangle(img, (x1s, y1s), (x2s, y2s), (0, 0, 255), 2)
+        #cv2.rectangle(img, (x1s, y1s), (x2s, y2s), (0, 0, 255), 2)
         cv2.circle(img, (cxs, cys), 5, (0, 0, 255), -1)
 
         # get 3d camera coord from center (float) -> [x,y,z] in meters
         xyz_cam = None
         if depth_sel is not None and float(depth_sel) > 0:
             z_d = float(depth_sel) / 1000.0
-            #xyz = unproject_pixel_to_cam(cxf, cyf, z_m, COLOR_INTRINSIC)
 
             x_cam, y_cam, _ = get_cam_coord(center_uv, COLOR_INTRINSIC)
                     
@@ -110,27 +118,32 @@ def draw_detections(img, model, image_path: str) -> None:
             y_text = min(img.shape[0] - 5, y1s + 18)
             cv2.putText(img, lbl_xyz, (x1s, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
 
+    cv2.imshow('inference', img)
+    
+
 
 def main():
     checkpoint_root = os.path.join(os.path.dirname(__file__), 'checkpoint')
     weights = find_latest_checkpoint(checkpoint_root)
     model = YOLO(weights)
 
-    img_paths: List[str] = get_file_list(RGB_TRAIN, 10)
-    if not img_paths:
-        print('No test images found at:', RGB_TRAIN)
-        return
+    split='test'
 
-    for p in img_paths:
-        img = cv2.imread(p)
-        if img is None:
-            print('Failed to read:', p)
-            continue
-        draw_detections(img, model, p)
-        cv2.imshow('inference', img)
+    print(f"Split: {split}")
+    data_src = RGB_TRAIN if split=='train' else RGB_TEST
+
+    img_paths: List[str] = get_file_list(data_src, -1)
+    if not img_paths:
+        print('No images found at:', data_src)
+        return
+    print("Data source: ", data_src)
+
+    for image_path in img_paths:
+        draw_detections(model, image_path, split)
         key = cv2.waitKey(0) & 0xFF
         if key == ord('q'):
-            break
+            continue
+
     cv2.destroyAllWindows()
 
 

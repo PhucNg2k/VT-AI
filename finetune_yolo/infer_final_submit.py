@@ -2,24 +2,25 @@ import os
 import csv
 import glob
 from typing import List
-
+import numpy as np
 import cv2
 
 try:
     from Code.config import RGB_TEST, RGB_TRAIN
     from Code.file_utils import get_file_list, get_depth_pixel
     from Code.phases.filter_phase import select_topmost_per_image
-    from Code.camera_config import get_cam_coord, COLOR_INTRINSIC
+    from Code.camera_config import get_cam_coord, COLOR_INTRINSIC, PLY_MATRIX
     from Code.finetune_yolo.model_utils import detect_in_area_batch, detect_on_original_image
 except ImportError:
     from config import RGB_TEST, RGB_TRAIN
     from file_utils import get_file_list, get_depth_pixel
     from phases.filter_phase import select_topmost_per_image
-    from camera_config import get_cam_coord, COLOR_INTRINSIC
+    from camera_config import get_cam_coord, COLOR_INTRINSIC, PLY_MATRIX
     from finetune_yolo.model_utils import detect_in_area_batch, detect_on_original_image
 
 from ultralytics import YOLO
 
+T_MAT = np.asarray(PLY_MATRIX, dtype=float)
 
 def find_latest_checkpoint(checkpoint_root: str) -> str:
     if not os.path.isdir(checkpoint_root):
@@ -59,7 +60,7 @@ def run_and_export(output_csv: str, split) -> None:
         if not dets_for_filter:
             dets_for_filter = [{"image_path": image_path, "center": []}]
 
-        selections = select_topmost_per_image(dets_for_filter, split=split)
+        selections = select_topmost_per_image(dets_for_filter, split=split, direct=True)
         
         if len(selections) == 1:
             img_path, center_uv, depth_sel, det_sel = selections[0]
@@ -78,9 +79,9 @@ def run_and_export(output_csv: str, split) -> None:
                 #xyz = unproject_pixel_to_cam(cxf, cyf, z_m, COLOR_INTRINSIC)
 
                 x_cam, y_cam, _ = get_cam_coord(center_uv, COLOR_INTRINSIC)
-                        
-                xyz_cam = tuple(map(float, (x_cam, y_cam, z_d)))
-                x_cam, y_cam, z_cam = xyz_cam
+                point_cloud = [x_cam, y_cam, z_d] @ T_MAT.T        
+                
+                x_cam, y_cam, z_cam = point_cloud
     
             # Compose CSV row
                 rows.append({
@@ -104,7 +105,7 @@ def run_and_export(output_csv: str, split) -> None:
 
 
 if __name__ == "__main__":
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "train_test.csv")
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submission_3D1.csv")
     print(f"Saving to {out_csv}")
-    run_and_export(out_csv, split='train')
+    run_and_export(out_csv, split='test')
 

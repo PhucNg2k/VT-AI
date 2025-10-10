@@ -24,7 +24,7 @@ from Code.coord_utils import in_roi, dist_from_robot, bbox_center_from_xywhr, bb
 from Code.file_utils import get_depth_pixel
 
 
-def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -> List[Tuple[str, Tuple[float, float], float, Dict[str, Any]]]:
+def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train', direct=True) -> List[Tuple[str, Tuple[float, float], float, Dict[str, Any]]]:
     """
     For each image, select one detection by rules and return a list of
     (image_path, center_uv, depth_mm, det_dict).
@@ -62,10 +62,9 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
                 #print("Center not in ROI:", d)
                 continue
 
-            depth_mm = get_depth_pixel(image_path, (cx, cy), set=split)
+            depth_mm = get_depth_pixel(image_path, (cx, cy), direct, set=split)
             
             if depth_mm is None or float(depth_mm) <= 0:
-                print("Depth mm not found:", depth_mm)
                 continue
             
             cand = {
@@ -95,6 +94,7 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train') -
             chosen = sorted(ties, key=lambda x: (x["center_uv"][0], x["center_uv"][1]))[0]
 
         # (image, chosen_point)
+        print('chosen det: ', chosen)
         selected.append((image_path, chosen["center_uv"], chosen["depth"], chosen["det"]))
 
     return selected
