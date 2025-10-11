@@ -667,7 +667,7 @@ def run_and_export(output_csv: str, split) -> None:
                                 rx, ry, rz = 0.0, 0.0, 1.0  # fallback
                             
                             # visualize mask_pcd with estimated normal and X-axis
-                            #$visualize_pcd_mask(image_path, mask_pcd, xyz_cam, normal_vector, x_axis_vector)
+                            #visualize_pcd_mask(image_path, mask_pcd, xyz_cam, normal_vector, x_axis_vector)
                             
 
                         except Exception as e:
@@ -707,7 +707,7 @@ def run_and_export(output_csv: str, split) -> None:
 if __name__ == "__main__":
     
 
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submission_3D.csv")
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "train_pred.csv")
     print(f"Saving to {out_csv}")
-    run_and_export(out_csv, split='test')
+    run_and_export(out_csv, split='train')
 
