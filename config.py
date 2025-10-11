@@ -6,6 +6,7 @@ PUB_DATA_BASE = os.path.abspath(os.path.join(REPO_ROOT,'Public data'))
 
 PUB_TRAIN_BASE = os.path.join(PUB_DATA_BASE, "Public data train")
 PUB_TEST_BASE = os.path.join(PUB_DATA_BASE, "Public data test")
+PUB_TEST_BASE = os.path.join(PUB_DATA_BASE, "Thisinh")
 
 print("Data base: ", PUB_DATA_BASE)
 

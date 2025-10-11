@@ -42,7 +42,7 @@ def find_latest_checkpoint(checkpoint_root: str) -> str:
     return cand[0]
 
 
-def create_detection_point_cloud_mask(image_path: str, det_sel, split='train', default_depth: float = 1.0, filter_dense: bool = True) -> o3d.geometry.PointCloud:
+def create_detection_point_cloud_mask(image_path: str, det_sel, split='train', default_depth: float = 1.0, filter_dense: bool = True, filter_patch=True) -> o3d.geometry.PointCloud:
     """
     Create a point cloud mask from depth map for pixels within the bounding box.
     
@@ -81,11 +81,11 @@ def create_detection_point_cloud_mask(image_path: str, det_sel, split='train', d
 
             for (x, y), depth_value in zip(coords, depths):
                 if depth_value is not None and depth_value > 0:
-                    z_d = float(depth_value - 20) / 1000.0 
+                    z_d = float(depth_value) / 1000.0 
                 else:
                     z_d = default_depth  # Default depth if None or 0
-                
-                # Convert pixel to 3D camera coordinates
+                        
+                        # Convert pixel to 3D camera coordinates
                 x_cam_pixel, y_cam_pixel, _ = get_cam_coord([x, y], COLOR_INTRINSIC)
                 detection_points_3d.append([x_cam_pixel, y_cam_pixel, z_d])
     
@@ -96,33 +96,140 @@ def create_detection_point_cloud_mask(image_path: str, det_sel, split='train', d
     else:
         # Fallback: create empty point cloud
         detection_point.points = o3d.utility.Vector3dVector([])
-    
+
+     # Keep only the top-grasp surface points (lowest depth values)
+    # This helps focus on the surface that's most accessible for grasping
+    if filter_patch:
+        points = np.asarray(detection_point.points)
+        
+        # Method 1: Use depth percentile instead of raw lowest values
+        # This is more robust to outliers and noise
+        z_coords = points[:, 2]
+        depth_percentile = np.percentile(z_coords, 40)  # Top 20% closest to camera
+        top_surface_mask = z_coords <= depth_percentile
+        top_surface_points = points[top_surface_mask]
+        
+        # Create new point cloud with filtered points
+        detection_point = o3d.geometry.PointCloud()
+        detection_point.points = o3d.utility.Vector3dVector(top_surface_points)
+        
     # Optionally keep only the densest cluster from the mask
     if filter_dense and len(detection_point.points) > 0:
-        detection_point = filter_cloud_mask_dbscan(detection_point, voxel_size=0.01)
+        detection_point = filter_cloud_mask_dbscan(detection_point, voxel_size=0.05)
     
     detection_point.paint_uniform_color([1, 0, 0]) # RED
     return detection_point
 
 
-def predict_orientation_from_mask(mask_pcd, min_points=20,
-                                  max_iterations=1000,
-                                  threshold=0.01,
-                                  z_flip_to_camera=True):
-    """
-    Hybrid RANSAC + PCA normal estimation for a parcel patch.
 
-    1. Fit a robust plane with RANSAC (coarse normal)
-    2. Run PCA on inliers to refine tangent axes
-    3. Enforce orthogonality, flip normal to face camera if needed
+def compute_normal_from_points(mask_pcd):
+    """
+    Compute surface normal (nx, ny, nz) from a smooth patch of point cloud.
+    """
+    if mask_pcd is None:
+        return None
+    
+    print('estimating parcel orientation from point cloud ranges...')
+    
+    # Get point cloud data
+    points = np.asarray(mask_pcd.points)
+    print(f"Point cloud size: {len(points)}")
+
+    # 1️⃣ Compute centroid
+    centroid = np.mean(points, axis=0)
+
+    # 2️⃣ Center the points
+    pts_centered = points - centroid
+
+    # 3️⃣ Compute covariance
+    cov = np.cov(pts_centered.T)
+
+    # 4️⃣ Eigen decomposition
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    # 5️⃣ Smallest eigenvector = surface normal
+    normal = eigvecs[:, np.argmin(eigvals)]
+
+    # 6️⃣ Normalize
+    normal = normal / np.linalg.norm(normal)
+
+    if normal[2] < 0:
+        normal = -normal
+
+    print(f"Orient normal: {normal}")
+    return normal
+
+def predict_orientation_from_mask(mask_pcd, min_points=40,
+                                 max_iterations=1000,
+                                 threshold=0.03,
+                                 bbox_xyxy=None,
+                                 K=None):
+    """
+    Estimate parcel orientation using point cloud analysis:
+    1. Identify X,Y sides from point cloud ranges
+    2. Compute Z-axis pointing outward (negative Z)
+    3. Apply RANSAC to get fitting plane
+    4. Visualize coordinate system and plane
 
     Returns:
-        normal (np.ndarray of shape (3,)): normalized normal (rx, ry, rz)
+        normal (np.ndarray of shape (3,)): normalized normal vector (rx, ry, rz)
     """
     if mask_pcd is None or len(mask_pcd.points) < min_points:
         return None
-
-    # --- 1️⃣ RANSAC plane fitting (robust coarse normal)
+    
+    print('estimating parcel orientation from point cloud ranges...')
+    
+    # Get point cloud data
+    points = np.asarray(mask_pcd.points)
+    print(f"Point cloud size: {len(points)}")
+    
+    # --- Step 1: Compute parcel coordinate system from point cloud patch
+    # Origin is at the center of the point cloud patch
+    centroid = np.mean(points, axis=0)
+    print(f"Point cloud centroid: {centroid}")
+    
+    # Compute ranges to determine long and short sides
+    x_range = np.max(points[:, 0]) - np.min(points[:, 0])
+    y_range = np.max(points[:, 1]) - np.min(points[:, 1])
+    
+    print(f"X range: {x_range:.4f}, Y range: {y_range:.4f}")
+    
+    # Compute nx (long side direction vector) by traversing along the long side of point cloud
+    if x_range >= y_range:
+        # X is long side - direction vector along X direction
+        nx = np.array([1, 0, 0])  # Direction vector along X direction (long side)
+        ny = np.array([0, 1, 0])  # Direction vector along Y direction (short side)
+        print("Long side: X direction")
+    else:
+        # Y is long side - direction vector along Y direction  
+        nx = np.array([0, 1, 0])  # Direction vector along Y direction (long side)
+        ny = np.array([1, 0, 0])  # Direction vector along X direction (short side)
+        print("Long side: Y direction")
+    
+    # Compute nz by cross product of nx and ny
+    nz = np.cross(nx, ny)
+    nz /= np.linalg.norm(nz)
+    
+    # Ensure nz points outward (negative Z in camera frame)
+    if nz[2] > 0:
+        nz = -nz
+    
+    print(f"nx (long side direction vector): {nx}")
+    print(f"ny (short side direction vector): {ny}")
+    print(f"nz (outward direction vector): {nz}")
+    
+    # All direction vectors start from parcel origin (centroid) and are relative to camera frame
+    
+    # --- Step 3: Compute surface normal using PCA (more robust for smooth patches)
+    surface_normal = compute_normal_from_points(points)
+    
+    if surface_normal is None:
+        print("Failed to compute surface normal")
+        return None
+    
+    print(f"Surface normal (PCA): {surface_normal}")
+    
+    # --- Step 4: Apply RANSAC for comparison/validation
     try:
         plane_model, inliers = mask_pcd.segment_plane(
             distance_threshold=threshold,
@@ -130,46 +237,26 @@ def predict_orientation_from_mask(mask_pcd, min_points=20,
             num_iterations=max_iterations
         )
     except Exception:
-        return None
+        print("RANSAC failed")
+        return surface_normal  # Return PCA normal if RANSAC fails
 
     if plane_model is None or len(inliers) == 0:
-        return None
+        print("No plane found by RANSAC, using PCA normal")
+        return surface_normal
 
     a, b, c, d = plane_model
-    z_axis_ransac = np.array([a, b, c], dtype=float)
-    z_axis_ransac /= np.linalg.norm(z_axis_ransac)
-
-    # --- 2️⃣ PCA refinement on inlier points
-    inlier_cloud = mask_pcd.select_by_index(inliers)
-    points = np.asarray(inlier_cloud.points)
-    centroid = np.mean(points, axis=0)
-    pts_centered = points - centroid
-
-    if pts_centered.shape[0] < 3:
-        return z_axis_ransac
-
-    cov = np.cov(pts_centered.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    order = np.argsort(eigvals)[::-1]
-    eigvecs = eigvecs[:, order]
-
-    x_axis_pca, y_axis_pca, _ = eigvecs.T
-
-    # --- 3️⃣ Reconstruct orthogonal frame, align Z with plane
-    z_axis = z_axis_ransac
-    y_axis = np.cross(z_axis, x_axis_pca)
-    y_axis /= np.linalg.norm(y_axis)
-    x_axis = np.cross(y_axis, z_axis)
-    x_axis /= np.linalg.norm(x_axis)
-
-    # --- 4️⃣ Flip Z to face camera (camera at origin)
-    view_dir = -centroid  # from parcel → camera
-    if np.dot(z_axis, view_dir) < 0 and z_flip_to_camera:
-        z_axis = -z_axis
-        x_axis = -x_axis  # maintain right-handedness
-
-    # Return refined normal only (rx, ry, rz)
-    return z_axis_ransac
+    ransac_normal = np.array([a, b, c], dtype=float)
+    ransac_normal /= np.linalg.norm(ransac_normal)
+    
+    print(f"RANSAC plane normal: {ransac_normal}")
+    print(f"RANSAC plane equation: {a:.4f}x + {b:.4f}y + {c:.4f}z + {d:.4f} = 0")
+    
+    # Compare PCA and RANSAC normals
+    dot_product = np.dot(surface_normal, ransac_normal)
+    print(f"PCA vs RANSAC normal similarity: {dot_product:.4f}")
+    
+    # Use PCA normal as it's more robust for smooth patches
+    return surface_normal
 
 
 
@@ -180,11 +267,11 @@ def preprocess_pcd(pcd: o3d.geometry.PointCloud, voxel_size: float = 0.01) -> o3
     """
     pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=30, std_ratio=1.0)
     
-    pcd, _ = pcd.remove_radius_outlier(nb_points=20, radius=0.01)
-    pcd = pcd.voxel_down_sample(voxel_size)
+    pcd, _ = pcd.remove_radius_outlier(nb_points=30, radius=0.01)
+    #pcd = pcd.voxel_down_sample(voxel_size)
     return pcd
 
-def estimate_smooth_normal(pcd, voxel_size=0.002):
+def estimate_smooth_normal(pcd, voxel_size=0.001):
     # Denoise
     #pcd = preprocess_pcd(pcd, voxel_size)
 
@@ -241,6 +328,7 @@ def filter_cloud_mask_dbscan(detection_point: o3d.geometry.PointCloud, eps: floa
     
     filtered = o3d.geometry.PointCloud()
     filtered.points = o3d.utility.Vector3dVector(filtered_points)
+
     return filtered
 
 
@@ -279,16 +367,20 @@ def get_depth_values_batch(image_path: str, coords: List[tuple], split='train') 
 def get_depth_line(coord, orient, color=[1,0,1]):
     
     cam_plane_point = np.array([coord[0], coord[1], 0.0], dtype=float)
-    orient_dir = np.array(orient, dtype=float)
-    orient_norm = np.linalg.norm(orient_dir)
+    surface_point = np.array(coord, dtype=float)
     
-    if orient_norm > 1e-12:
-        orient_dir = orient_dir / orient_norm
+    # Calculate camera ray direction (from camera plane to surface point)
+    camera_ray = surface_point - cam_plane_point
+    camera_ray_norm = np.linalg.norm(camera_ray)
+    
+    if camera_ray_norm > 1e-12:
+        camera_ray = camera_ray / camera_ray_norm
     else:
-        orient_dir = np.array([0.0, 0.0, 1.0])
+        camera_ray = np.array([0.0, 0.0, 1.0])
+    
+    # Use camera ray direction for the line
     depth_len = float(max(0.0, coord[2]))
-
-    line_end = cam_plane_point + orient_dir * depth_len
+    line_end = cam_plane_point + camera_ray * depth_len
     depth_line_points = o3d.utility.Vector3dVector([
         cam_plane_point,
         line_end
@@ -303,7 +395,7 @@ def get_depth_line(coord, orient, color=[1,0,1]):
 
     return depth_line
 
-def visualize_pcd_mask(image_path, mask_pcd, target_point, normal_vector):
+def visualize_pcd_mask(image_path, mask_pcd, target_point, normal_vector, x_axis_vector=None):
     ply_path = rgb_to_ply_path(image_path)
     try:
         # Load original point cloud
@@ -317,90 +409,138 @@ def visualize_pcd_mask(image_path, mask_pcd, target_point, normal_vector):
             except Exception:
                 pass
 
-            # Target point already in camera frame
-            target_point_cam = np.array(target_point)
+            # Create geometries for visualization (like visualize_data.py)
+            geometries = []
             
-            # Create coordinate frame at origin
-            w_axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
-
-            # Create target point visualization
-            target_point_pcd = o3d.geometry.PointCloud()
-            target_point_pcd.points = o3d.utility.Vector3dVector([target_point_cam])
-            target_point_pcd.paint_uniform_color([0, 1, 1])  
+            # 1. Original PLY point cloud (light gray)
+            #pcd_original.paint_uniform_color([0.7, 0.7, 0.7])  # Light gray
+            geometries.append(pcd_original)
             
-            # Create ground truth visualization (for testing)
-            gt_coord = (-0.058, 0.043, 1.059)  # already camera frame
-            gt_orient = (0, 0, 1)            # already camera frame
+            # 2. Mask point cloud (red)
+            if len(mask_pcd.points) > 0:
+                mask_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+                geometries.append(mask_pcd)
             
-            gt_depth_line = get_depth_line(gt_coord, gt_orient, [0,1,0])
-            target_depth_line = get_depth_line(target_point, normal_vector, [1,0,0])
-
-            # Minimal: visualize predicted normal (as-is, not converted) from mask surface
-            surf_normal_arrow = None
-            tangent_plane = None
-            if normal_vector is not None and len(mask_pcd.points) > 0:
-                try:
-                    centroid = np.asarray(mask_pcd.points).mean(axis=0)
-                    n = np.asarray(normal_vector, dtype=float)
-                    n /= (np.linalg.norm(n) + 1e-12)
-
-                    # build arrow and align +Z to n
-                    surf_normal_arrow = o3d.geometry.TriangleMesh.create_arrow(
-                        cylinder_radius=0.004,
-                        cone_radius=0.008,
-                        cylinder_height=0.07,
-                        cone_height=0.03,
-                    )
+            # 3. Camera plane point (blue)
+            camera_plane_point = [target_point[0], target_point[1], 0.0]
+            camera_plane_pcd = o3d.geometry.PointCloud()
+            camera_plane_pcd.points = o3d.utility.Vector3dVector([camera_plane_point])
+            camera_plane_pcd.paint_uniform_color([0.0, 0.0, 1.0])  # Blue
+            geometries.append(camera_plane_pcd)
+            
+            # 4. Surface point (red)
+            surface_point = target_point
+            surface_pcd = o3d.geometry.PointCloud()
+            surface_pcd.points = o3d.utility.Vector3dVector([surface_point])
+            surface_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+            geometries.append(surface_pcd)
+            
+            # 5. Orientation vector (green arrow)
+            if normal_vector is not None:
+                arrow = o3d.geometry.TriangleMesh.create_arrow(
+                    cylinder_radius=0.01,
+                    cone_radius=0.02,
+                    cylinder_height=0.15,
+                    cone_height=0.05,
+                )
+                
+                # Position arrow at surface point
+                arrow.translate([target_point[0], target_point[1], target_point[2]])
+                
+                # Orient arrow along orientation vector
+                orient = np.array(normal_vector, dtype=float)
+                orient_norm = np.linalg.norm(orient)
+                if orient_norm > 1e-12:
+                    orient = orient / orient_norm
+                    
+                    # Create rotation matrix to align arrow with orientation
                     z_axis = np.array([0.0, 0.0, 1.0])
-                    if np.allclose(n, z_axis):
+                    if np.allclose(orient, z_axis):
                         R = np.eye(3)
                     else:
-                        axis = np.cross(z_axis, n)
+                        axis = np.cross(z_axis, orient)
                         axis_norm = np.linalg.norm(axis)
                         if axis_norm < 1e-12:
                             R = np.eye(3)
                         else:
                             axis /= axis_norm
-                            angle = np.arccos(np.clip(np.dot(z_axis, n), -1.0, 1.0))
+                            angle = np.arccos(np.clip(np.dot(z_axis, orient), -1.0, 1.0))
                             K = np.array([[0, -axis[2], axis[1]],
                                           [axis[2], 0, -axis[0]],
                                           [-axis[1], axis[0], 0]])
                             R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
-                    surf_normal_arrow.rotate(R, center=[0, 0, 0])
-                    surf_normal_arrow.translate(centroid)
-                    surf_normal_arrow.paint_uniform_color([1.0, 0.5, 0.0])  # orange
-
-                    # Tangent plane (yellow) centered at centroid, oriented by n
-                    plane_size = 0.12
-                    plane_thickness = 0.001
-                    tangent_plane = o3d.geometry.TriangleMesh.create_box(
-                        width=plane_size, height=plane_size, depth=plane_thickness
-                    )
-                    # center the box at origin first
-                    tangent_plane.translate([-plane_size/2.0, -plane_size/2.0, -plane_thickness/2.0])
-                    tangent_plane.rotate(R, center=[0, 0, 0])
-                    tangent_plane.translate(centroid)
-                    tangent_plane.paint_uniform_color([1.0, 1.0, 0.0])
-                except Exception:
-                    surf_normal_arrow = None
-                    tangent_plane = None
-
-            # Prepare geometries for visualization
-            geometries = [pcd_original, mask_pcd, target_depth_line, w_axis]
-            if surf_normal_arrow is not None:
-                geometries.append(surf_normal_arrow)
-            if tangent_plane is not None:
-                geometries.append(tangent_plane)
-        
-            # Visualize together (now centered at origin)
+                    
+                    arrow.rotate(R, center=[target_point[0], target_point[1], target_point[2]])
+                
+                arrow.paint_uniform_color([0.0, 1.0, 0.0])  # Green
+                geometries.append(arrow)
+            
+            # 6. X-axis vector (yellow arrow) - parcel long side
+            if x_axis_vector is not None:
+                x_arrow = o3d.geometry.TriangleMesh.create_arrow(
+                    cylinder_radius=0.008,
+                    cone_radius=0.015,
+                    cylinder_height=0.12,
+                    cone_height=0.04,
+                )
+                
+                # Position arrow at surface point
+                x_arrow.translate([target_point[0], target_point[1], target_point[2]])
+                
+                # Orient arrow along X-axis vector
+                x_orient = np.array(x_axis_vector, dtype=float)
+                x_orient_norm = np.linalg.norm(x_orient)
+                if x_orient_norm > 1e-12:
+                    x_orient = x_orient / x_orient_norm
+                    
+                    # Create rotation matrix to align arrow with X-axis
+                    z_axis = np.array([0.0, 0.0, 1.0])
+                    if np.allclose(x_orient, z_axis):
+                        R_x = np.eye(3)
+                    else:
+                        axis_x = np.cross(z_axis, x_orient)
+                        axis_x_norm = np.linalg.norm(axis_x)
+                        if axis_x_norm < 1e-12:
+                            R_x = np.eye(3)
+                        else:
+                            axis_x /= axis_x_norm
+                            angle_x = np.arccos(np.clip(np.dot(z_axis, x_orient), -1.0, 1.0))
+                            K_x = np.array([[0, -axis_x[2], axis_x[1]],
+                                            [axis_x[2], 0, -axis_x[0]],
+                                            [-axis_x[1], axis_x[0], 0]])
+                            R_x = np.eye(3) + np.sin(angle_x) * K_x + (1 - np.cos(angle_x)) * (K_x @ K_x)
+                    
+                    x_arrow.rotate(R_x, center=[target_point[0], target_point[1], target_point[2]])
+                
+                x_arrow.paint_uniform_color([1.0, 1.0, 0.0])  # Yellow
+                geometries.append(x_arrow)
+            
+            # 7. Camera ray line (from camera plane to surface)
+            cam_plane = np.array([target_point[0], target_point[1], 0.0])
+            surface = np.array(target_point)
+            
+            # Create line from camera plane to surface
+            line_points = o3d.utility.Vector3dVector([cam_plane, surface])
+            line = o3d.geometry.LineSet(
+                points=line_points,
+                lines=o3d.utility.Vector2iVector([[0, 1]])
+            )
+            line.colors = o3d.utility.Vector3dVector([[0.0, 1.0, 1.0]])  # Cyan
+            geometries.append(line)
+            
+            # 8. Coordinate frame at origin
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
+            geometries.append(coord_frame)
+            
+            # Visualize
             print(f"Visualizing detection vs point cloud: {ply_path}")
             o3d.visualization.draw_geometries(
-                geometries, 
+                geometries,
                 window_name=f"Detection vs PCD: {os.path.basename(image_path)}",
-                lookat=np.array([0.0, 0.0, 0.0]),  # Look at origin
-                front=np.array([0.0, 0.0, -1.0]),  
-                up=np.array([0.0, -1.0, 0.0]),     
-                zoom=-3
+                lookat=np.array([0.0, 0.0, 0.0]),
+                front=np.array([0.0, 0.0, -1.0]),
+                up=np.array([0.0, -1.0, 0.0]),
+                zoom=0.8
             )
         else:
             print("Empty point cloud:", ply_path)
@@ -419,17 +559,31 @@ def visualize_detection(image_path, bbox_xyxy, z_d):
     label = f"depth={depth_txt}"
     cv2.rectangle(tmp_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
     cv2.putText(tmp_img, label, (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.circle(tmp_img, ( int( 0.5 * (x1 + x2)), int(0.5 * (y1 + y2))), 5, (0, 0, 255), -1)
 
     cv2.imshow('inference', tmp_img)
     key = cv2.waitKey(0) & 0xFF  # Non-blocking wait
     cv2.destroyAllWindows()
 
 
+def find_best_grasp_point(mask_pcd):
+    points = np.asarray(mask_pcd.points)
+    # Use the point closest to the plane center
+
+    depth_90pc = np.percentile(points[:, 2], 40)
+
+    anchor_center = np.mean(points, axis=0)
+
+
+    distances = np.linalg.norm(points - anchor_center, axis=1)
+    best_idx = np.argmin(distances)
+    return points[best_idx]
+
 def run_and_export(output_csv: str, split) -> None:
     checkpoint_root = os.path.join(os.path.dirname(__file__), 'checkpoint')
     weights = find_latest_checkpoint(checkpoint_root)
     model = YOLO(weights)
-    
+
     
     print(f"Split: {split}")
     data_src = RGB_TRAIN if split=='train' else RGB_TEST
@@ -447,7 +601,7 @@ def run_and_export(output_csv: str, split) -> None:
         if not dets_for_filter:
             dets_for_filter = [{"image_path": image_path, "center_uv": []}]
 
-        selections = select_topmost_per_image(dets_for_filter, direct=False, split=split)        
+        selections = select_topmost_per_image(dets_for_filter, direct=False, split=split)
         if len(selections) == 1:
             img_path, center_uv, depth_sel, det_sel = selections[0]
                 
@@ -459,7 +613,7 @@ def run_and_export(output_csv: str, split) -> None:
             xyz_cam = None
             if depth_sel is not None and float(depth_sel) > 0:
                 z_d = float(depth_sel) / 1000.0
-            
+
                 x_cam, y_cam, _ = get_cam_coord(center_uv, COLOR_INTRINSIC)
                         
                 xyz_cam = list(map(float, (x_cam, y_cam, z_d)))
@@ -473,45 +627,47 @@ def run_and_export(output_csv: str, split) -> None:
                 
                 else:
                     print("creating cloud mask")
-                    #visualize_detection(image_path, bbox_xyxy, z_d, split)
+                    #visualize_detection(image_path, bbox_xyxy, z_d)
 
-                    mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, split=split, filter_dense=True) # cloud
-    
+                    mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, split=split, filter_dense=True, filter_patch=True) # cloud
+                    print('Cloud mask size: ', len(mask_pcd.points))
+
                     try:
                         if len(mask_pcd.points) > 0:
                             mask_pts_cloud = np.asarray(mask_pcd.points)
                             # Use centroid of mask for xyz_cam
-                            centroid = mask_pts_cloud.mean(axis=0)
-                            x_cam, y_cam, z_cam = list(map(float, centroid))
+                            #centroid = mask_pts_cloud.mean(axis=0)
+                            #x_cam, y_cam, z_cam = list(map(float, centroid))
+
+                            x_cam, y_cam, z_cam = find_best_grasp_point(mask_pcd)
                             xyz_cam = [x_cam, y_cam, z_cam]
-                            print("xyz_cam (centroid): ", xyz_cam)
+                            
+                            print("xyz_cam: ", xyz_cam)
                     except Exception as e:
                         print("error cloud mask: ", e)
                         pass
-
+                    
                     if len(mask_pcd.points) > 0:
                         normal_vector = None
+                        x_axis_vector = None
                         cam_normal_vector = None
                         try:
-                            print("predicting orient normal..")
-                            normal_vector = predict_orientation_from_mask(mask_pcd)
-                            #normal_vector = estimate_smooth_normal(mask_pcd)
-
+                            #normal_vector = predict_orientation_from_mask(mask_pcd, bbox_xyxy=bbox_xyxy, K=COLOR_INTRINSIC)
+                            normal_vector = compute_normal_from_points(mask_pcd)
+                            
                             if normal_vector is not None:
-                                normal_vector = np.asarray(normal_vector) # cloud coord
-                                print("Estimated normal vector: ", normal_vector)
+                                normal_vector = np.asarray(normal_vector) 
                                
-                                cam_normal_vector = T_MAT @ normal_vector
-                                cam_normal_vector /= np.linalg.norm(cam_normal_vector)
-                                
-                                print("Camera normal vector: ", cam_normal_vector)
+                                # Use the normal vector directly as rx, ry, rz
+                                # The normal vector is already oriented with X as parcel long side
+                                #normal_vector = 0,0,1
                                 rx, ry, rz = normal_vector
                                 
                             else:
                                 rx, ry, rz = 0.0, 0.0, 1.0  # fallback
                             
-                            # visualize mask_pcd with estimated normal
-                            visualize_pcd_mask(image_path, mask_pcd, xyz_cam, normal_vector)
+                            # visualize mask_pcd with estimated normal and X-axis
+                            #$visualize_pcd_mask(image_path, mask_pcd, xyz_cam, normal_vector, x_axis_vector)
                             
 
                         except Exception as e:
@@ -539,8 +695,6 @@ def run_and_export(output_csv: str, split) -> None:
         else:
             print("INVALID SELECTED RESULT")
         
-        
-
 
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     with open(output_csv, "w", newline="") as f:
@@ -551,7 +705,9 @@ def run_and_export(output_csv: str, split) -> None:
 
 
 if __name__ == "__main__":
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submit_test_pcd_hybrid-1.csv")
+    
+
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submission_3D.csv")
     print(f"Saving to {out_csv}")
     run_and_export(out_csv, split='test')
 

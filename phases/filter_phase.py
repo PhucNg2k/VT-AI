@@ -94,7 +94,7 @@ def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train', d
             chosen = sorted(ties, key=lambda x: (x["center_uv"][0], x["center_uv"][1]))[0]
 
         # (image, chosen_point)
-        print('chosen det: ', chosen)
+        print('chosen det: ', chosen['center_uv'], chosen['depth'])
         selected.append((image_path, chosen["center_uv"], chosen["depth"], chosen["det"]))
 
     return selected
