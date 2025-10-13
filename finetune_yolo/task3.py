@@ -7,6 +7,9 @@ import cv2
 import numpy as np
 import open3d as o3d
 
+from sklearn.cluster import MeanShift, estimate_bandwidth
+
+
 try:
     from Code.config import RGB_TEST, RGB_TRAIN
     from Code.file_utils import get_file_list, get_depth_pixel, get_depth_pixel_batch as _get_depth_batch
@@ -115,7 +118,8 @@ def create_detection_point_cloud_mask(image_path: str, det_sel, split='train', d
         
     # Optionally keep only the densest cluster from the mask
     if filter_dense and len(detection_point.points) > 0:
-        detection_point = filter_cloud_mask_dbscan(detection_point, voxel_size=0.05)
+        #detection_point = filter_cloud_mask_dbscan(detection_point, voxel_size=0.05)
+        detection_point = filter_cloud_mask_meanshift(detection_point, voxel_size=0.05)
     
     detection_point.paint_uniform_color([1, 0, 0]) # RED
     return detection_point
@@ -312,6 +316,57 @@ def estimate_smooth_normal(pcd, voxel_size=0.001):
     return avg_normal
 
 
+
+def filter_cloud_mask_meanshift(
+    detection_point: o3d.geometry.PointCloud,
+    quantile: float = 0.2,
+    n_samples: int = 500,
+    voxel_size: float = 0.01
+) -> o3d.geometry.PointCloud:
+    """
+    Filter a mask point cloud using MeanShift to keep only the densest cluster.
+    Returns a new point cloud containing only points from the densest cluster.
+    """
+
+    if len(detection_point.points) == 0:
+        return detection_point
+
+    # Downsample for efficiency
+    if voxel_size > 0:
+        ds_cloud = preprocess_pcd(detection_point, voxel_size=voxel_size)
+    else:
+        ds_cloud = detection_point
+
+    if len(ds_cloud.points) == 0:
+        return detection_point
+
+    ds_points = np.asarray(ds_cloud.points)
+
+    print("Clustering with MeanShift ...")
+
+    # Estimate bandwidth automatically from sample
+    bandwidth = estimate_bandwidth(ds_points, quantile=quantile, n_samples=min(n_samples, len(ds_points)))
+
+    if bandwidth <= 0:
+        print("⚠️ Estimated bandwidth is non-positive. Skipping clustering.")
+        return detection_point
+
+    ms = MeanShift(bandwidth=bandwidth, bin_seeding=True, n_jobs=-1)
+    ms.fit(ds_points)
+    labels = ms.labels_
+
+    if labels.size == 0:
+        return detection_point
+
+    # Find densest cluster
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    densest_label = unique_labels[np.argmax(counts)]
+    filtered_points = ds_points[labels == densest_label]
+
+    filtered = o3d.geometry.PointCloud()
+    filtered.points = o3d.utility.Vector3dVector(filtered_points)
+
+    return filtered
 
 def filter_cloud_mask_dbscan(detection_point: o3d.geometry.PointCloud, eps: float = 0.03, min_points: int = 20, voxel_size: float = 0.01) -> o3d.geometry.PointCloud:
     """
@@ -650,7 +705,7 @@ def run_and_export(output_csv: str, split) -> None:
                 
                 else:
                     print("creating cloud mask")
-                    #visualize_detection(image_path, bbox_xyxy, z_d)
+                    visualize_detection(image_path, bbox_xyxy, z_d)
 
                     mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, split=split, filter_dense=True, filter_patch=True) # cloud
                     print('Cloud mask size: ', len(mask_pcd.points))
@@ -664,8 +719,8 @@ def run_and_export(output_csv: str, split) -> None:
 
                             #x_cam, y_cam, z_cam = find_best_grasp_point(mask_pcd)
                             xyz_cam = [x_cam, y_cam, z_cam]
-                            
                             print("xyz_cam: ", xyz_cam)
+                            
                     except Exception as e:
                         print("error cloud mask: ", e)
                         pass
@@ -676,7 +731,7 @@ def run_and_export(output_csv: str, split) -> None:
                         cam_normal_vector = None
                         try:
                             #normal_vector = predict_orientation_from_mask(mask_pcd, bbox_xyxy=bbox_xyxy, K=COLOR_INTRINSIC)
-                            normal_vector = compute_normal_from_points(mask_pcd)
+                            #normal_vector = compute_normal_from_points(mask_pcd)
                             
                             if normal_vector is not None:
                                 normal_vector = np.asarray(normal_vector) 
