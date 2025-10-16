@@ -15,3 +15,8 @@ phases/exp*
 submit
 
 *.csv
+
+
+PointNet
+
+*.pth

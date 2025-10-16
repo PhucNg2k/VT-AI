@@ -8,10 +8,6 @@ import cv2
 import numpy as np
 import sys
 import open3d as o3d
-
-from scipy.spatial import Delaunay
-from scipy.interpolate import griddata
-
 sys.path.append(r"D:\ViettelAI\Code")
 
 
@@ -75,7 +71,7 @@ def get_depth_correspond(image_path, coord):
 
     return float(depth_value)
 
-def create_detection_point_cloud_mask(image_path: str, det_sel, filter_dense: bool = True, filter_patch=True, filter_bg=True) -> o3d.geometry.PointCloud:
+def create_detection_point_cloud_mask(image_path: str, det_sel, filter_dense: bool = True, filter_patch=True) -> o3d.geometry.PointCloud:
     """
     Create a point cloud mask from depth map for pixels within the bounding box.
     
@@ -127,7 +123,7 @@ def create_detection_point_cloud_mask(image_path: str, det_sel, filter_dense: bo
                     if depth_value <= 0:
                         continue
             
-                    if filter_bg and depth_value >= 1150 and depth_value <= 1200:  # remove background
+                    if depth_value >= 1150 and depth_value <= 1200:  # remove background
                         continue
 
                     z_d = depth_value / 1000
@@ -372,22 +368,6 @@ def get_depth_line(coord, orient, color=[1,0,1]):
     return depth_line
 
 
-def get_plane_surface(mask_pcd):
-    mask_points = np.asarray(mask_pcd.points)
-    z_coords = mask_points[:, 2]
-    depth_percentile_90 = np.percentile(z_coords, 80)  # Top 90% closest to camera
-    top_90_mask = z_coords <= depth_percentile_90
-    
-    
-    top_90_points = mask_points[top_90_mask]
-
-    anchor_center = np.mean(top_90_points, axis=0)
-    distances = np.linalg.norm(top_90_points - anchor_center, axis=1)
-    best_idx = np.argmin(distances)
-    grasp_point = top_90_mask[best_idx]
-
-    # from top_90_points, grasp_point
-
 def flatout_mask(mask_pcd, og_pcd):
     """
     Get the top 90 percentile of mask_pcd, compare with og_pcd in same area,
@@ -403,8 +383,11 @@ def flatout_mask(mask_pcd, og_pcd):
     if mask_pcd is None or og_pcd is None or len(mask_pcd.points) == 0 or len(og_pcd.points) == 0:
         return mask_pcd
     
+    import numpy as np
+    from scipy.spatial import cKDTree
+    from scipy.interpolate import griddata
     
-    #print("FLATTING OUT MASK")
+    print("FLATTING OUT MASK")
     # Get top 90% of mask_pcd (closest to camera - lowest z values)
     mask_points = np.asarray(mask_pcd.points)
     z_coords = mask_points[:, 2]
@@ -484,7 +467,7 @@ def flatout_mask(mask_pcd, og_pcd):
             flat_surface_pcd.points = o3d.utility.Vector3dVector(np.array(interpolated_points))
             flat_surface_pcd.paint_uniform_color([0.0, 1.0, 0.0])  # Green for interpolated surface
             
-            #print(f"Flatout mask: kept {len(interpolated_points)} points with matching x,y coordinates")
+            print(f"Flatout mask: kept {len(interpolated_points)} points with matching x,y coordinates")
             return flat_surface_pcd
         else:
             print("Flatout mask: no points with matching x,y coordinates found")
@@ -494,152 +477,157 @@ def flatout_mask(mask_pcd, og_pcd):
         print(f"Interpolation failed: {e}")
         return mask_pcd
 
-def  visualize_pcd_mask(image_path=None, mask_pcd=None, orient_pcd=None, target_point=None, normal_vector=None, x_axis_vector=None):
+def visualize_pcd_mask(image_path, mask_pcd, target_point, normal_vector, x_axis_vector=None):
+    ply_path = rgb_to_ply_path(image_path)
     try:
-        geometries = []
-        
-        if image_path is not None:
-            ply_path = rgb_to_ply_path(image_path)
-            pcd_original = o3d.io.read_point_cloud(ply_path)
-        
-            pts_cloud = np.asarray(pcd_original.points)
-            pts_cam = pts_cloud @ T_MAT.T  # cloud -> camera
-            pcd_original.points = o3d.utility.Vector3dVector(pts_cam)
+        # Load original point cloud
+        pcd_original = o3d.io.read_point_cloud(ply_path)
+        if len(pcd_original.points) > 0:
+            # Transform original point cloud to camera frame
+            try:
+                pts_cloud = np.asarray(pcd_original.points)
+                pts_cam = pts_cloud @ T_MAT.T  # cloud -> camera
+                pcd_original.points = o3d.utility.Vector3dVector(pts_cam)
+            except Exception:
+                pass
+
+            # Create geometries for visualization (like visualize_data.py)
+            geometries = []
+            
+            # 1. Original PLY point cloud (light gray)
+            #pcd_original.paint_uniform_color([0.7, 0.7, 0.7])  # Light gray
             geometries.append(pcd_original)
-        
-        if orient_pcd is not None:
-            if len(orient_pcd.points) > 0:
-                orient_pcd.paint_uniform_color([1.0, 1.0, 0.0]) 
-                geometries.append(orient_pcd)
-        
-        # 2. Mask point cloud (red)
-        if len(mask_pcd.points) > 0:
-            mask_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
-            geometries.append(mask_pcd)
-        
-        # 3. Camera plane point (blue)
-        camera_plane_point = [target_point[0], target_point[1], 0.0]
-        camera_plane_pcd = o3d.geometry.PointCloud()
-        camera_plane_pcd.points = o3d.utility.Vector3dVector([camera_plane_point])
-        camera_plane_pcd.paint_uniform_color([0.0, 0.0, 1.0])  # Blue
-        geometries.append(camera_plane_pcd)
-        
-        # 4. Surface point (red)
-        surface_point = target_point
-        surface_pcd = o3d.geometry.PointCloud()
-        surface_pcd.points = o3d.utility.Vector3dVector([surface_point])
-        surface_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
-        geometries.append(surface_pcd)
-        
-        # 5. Orientation vector (green arrow)
-        if normal_vector is not None:
-            arrow = o3d.geometry.TriangleMesh.create_arrow(
-                cylinder_radius=0.01,
-                cone_radius=0.02,
-                cylinder_height=0.15,
-                cone_height=0.05,
-            )
             
-            # Position arrow at surface point
-            arrow.translate([target_point[0], target_point[1], target_point[2]])
+            # 2. Mask point cloud (red)
+            if len(mask_pcd.points) > 0:
+                mask_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+                geometries.append(mask_pcd)
             
-            # Orient arrow along orientation vector
-            orient = np.array(normal_vector, dtype=float)
-            orient_norm = np.linalg.norm(orient)
-            if orient_norm > 1e-12:
-                orient = orient / orient_norm
+            # 3. Camera plane point (blue)
+            camera_plane_point = [target_point[0], target_point[1], 0.0]
+            camera_plane_pcd = o3d.geometry.PointCloud()
+            camera_plane_pcd.points = o3d.utility.Vector3dVector([camera_plane_point])
+            camera_plane_pcd.paint_uniform_color([0.0, 0.0, 1.0])  # Blue
+            geometries.append(camera_plane_pcd)
+            
+            # 4. Surface point (red)
+            surface_point = target_point
+            surface_pcd = o3d.geometry.PointCloud()
+            surface_pcd.points = o3d.utility.Vector3dVector([surface_point])
+            surface_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+            geometries.append(surface_pcd)
+            
+            # 5. Orientation vector (green arrow)
+            if normal_vector is not None:
+                arrow = o3d.geometry.TriangleMesh.create_arrow(
+                    cylinder_radius=0.01,
+                    cone_radius=0.02,
+                    cylinder_height=0.15,
+                    cone_height=0.05,
+                )
                 
-                # Create rotation matrix to align arrow with orientation
-                z_axis = np.array([0.0, 0.0, 1.0])
-                if np.allclose(orient, z_axis):
-                    R = np.eye(3)
-                else:
-                    axis = np.cross(z_axis, orient)
-                    axis_norm = np.linalg.norm(axis)
-                    if axis_norm < 1e-12:
+                # Position arrow at surface point
+                arrow.translate([target_point[0], target_point[1], target_point[2]])
+                
+                # Orient arrow along orientation vector
+                orient = np.array(normal_vector, dtype=float)
+                orient_norm = np.linalg.norm(orient)
+                if orient_norm > 1e-12:
+                    orient = orient / orient_norm
+                    
+                    # Create rotation matrix to align arrow with orientation
+                    z_axis = np.array([0.0, 0.0, 1.0])
+                    if np.allclose(orient, z_axis):
                         R = np.eye(3)
                     else:
-                        axis /= axis_norm
-                        angle = np.arccos(np.clip(np.dot(z_axis, orient), -1.0, 1.0))
-                        K = np.array([[0, -axis[2], axis[1]],
-                                        [axis[2], 0, -axis[0]],
-                                        [-axis[1], axis[0], 0]])
-                        R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+                        axis = np.cross(z_axis, orient)
+                        axis_norm = np.linalg.norm(axis)
+                        if axis_norm < 1e-12:
+                            R = np.eye(3)
+                        else:
+                            axis /= axis_norm
+                            angle = np.arccos(np.clip(np.dot(z_axis, orient), -1.0, 1.0))
+                            K = np.array([[0, -axis[2], axis[1]],
+                                          [axis[2], 0, -axis[0]],
+                                          [-axis[1], axis[0], 0]])
+                            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+                    
+                    arrow.rotate(R, center=[target_point[0], target_point[1], target_point[2]])
                 
-                arrow.rotate(R, center=[target_point[0], target_point[1], target_point[2]])
+                arrow.paint_uniform_color([0.0, 1.0, 0.0])  # Green
+                geometries.append(arrow)
             
-            arrow.paint_uniform_color([0.0, 1.0, 0.0])  # Green
-            geometries.append(arrow)
-        
-        # 6. X-axis vector (yellow arrow) - parcel long side
-        if x_axis_vector is not None:
-            x_arrow = o3d.geometry.TriangleMesh.create_arrow(
-                cylinder_radius=0.008,
-                cone_radius=0.015,
-                cylinder_height=0.12,
-                cone_height=0.04,
-            )
-            
-            # Position arrow at surface point
-            x_arrow.translate([target_point[0], target_point[1], target_point[2]])
-            
-            # Orient arrow along X-axis vector
-            x_orient = np.array(x_axis_vector, dtype=float)
-            x_orient_norm = np.linalg.norm(x_orient)
-            if x_orient_norm > 1e-12:
-                x_orient = x_orient / x_orient_norm
+            # 6. X-axis vector (yellow arrow) - parcel long side
+            if x_axis_vector is not None:
+                x_arrow = o3d.geometry.TriangleMesh.create_arrow(
+                    cylinder_radius=0.008,
+                    cone_radius=0.015,
+                    cylinder_height=0.12,
+                    cone_height=0.04,
+                )
                 
-                # Create rotation matrix to align arrow with X-axis
-                z_axis = np.array([0.0, 0.0, 1.0])
-                if np.allclose(x_orient, z_axis):
-                    R_x = np.eye(3)
-                else:
-                    axis_x = np.cross(z_axis, x_orient)
-                    axis_x_norm = np.linalg.norm(axis_x)
-                    if axis_x_norm < 1e-12:
+                # Position arrow at surface point
+                x_arrow.translate([target_point[0], target_point[1], target_point[2]])
+                
+                # Orient arrow along X-axis vector
+                x_orient = np.array(x_axis_vector, dtype=float)
+                x_orient_norm = np.linalg.norm(x_orient)
+                if x_orient_norm > 1e-12:
+                    x_orient = x_orient / x_orient_norm
+                    
+                    # Create rotation matrix to align arrow with X-axis
+                    z_axis = np.array([0.0, 0.0, 1.0])
+                    if np.allclose(x_orient, z_axis):
                         R_x = np.eye(3)
                     else:
-                        axis_x /= axis_x_norm
-                        angle_x = np.arccos(np.clip(np.dot(z_axis, x_orient), -1.0, 1.0))
-                        K_x = np.array([[0, -axis_x[2], axis_x[1]],
-                                        [axis_x[2], 0, -axis_x[0]],
-                                        [-axis_x[1], axis_x[0], 0]])
-                        R_x = np.eye(3) + np.sin(angle_x) * K_x + (1 - np.cos(angle_x)) * (K_x @ K_x)
+                        axis_x = np.cross(z_axis, x_orient)
+                        axis_x_norm = np.linalg.norm(axis_x)
+                        if axis_x_norm < 1e-12:
+                            R_x = np.eye(3)
+                        else:
+                            axis_x /= axis_x_norm
+                            angle_x = np.arccos(np.clip(np.dot(z_axis, x_orient), -1.0, 1.0))
+                            K_x = np.array([[0, -axis_x[2], axis_x[1]],
+                                            [axis_x[2], 0, -axis_x[0]],
+                                            [-axis_x[1], axis_x[0], 0]])
+                            R_x = np.eye(3) + np.sin(angle_x) * K_x + (1 - np.cos(angle_x)) * (K_x @ K_x)
+                    
+                    x_arrow.rotate(R_x, center=[target_point[0], target_point[1], target_point[2]])
                 
-                x_arrow.rotate(R_x, center=[target_point[0], target_point[1], target_point[2]])
+                x_arrow.paint_uniform_color([1.0, 1.0, 0.0])  # Yellow
+                geometries.append(x_arrow)
             
-            x_arrow.paint_uniform_color([1.0, 1.0, 0.0])  # Yellow
-            geometries.append(x_arrow)
-        
-        # 7. Camera ray line (from camera plane to surface)
-        cam_plane = np.array([target_point[0], target_point[1], 0.0])
-        surface = np.array(target_point)
-        
-        # Create line from camera plane to surface
-        line_points = o3d.utility.Vector3dVector([cam_plane, surface])
-        line = o3d.geometry.LineSet(
-            points=line_points,
-            lines=o3d.utility.Vector2iVector([[0, 1]])
-        )
-        line.colors = o3d.utility.Vector3dVector([[0.0, 1.0, 1.0]])  # Cyan
-        geometries.append(line)
-        
-        # 8. Coordinate frame at origin
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
-        geometries.append(coord_frame)
-        
-        # Visualize
-        print(f"Visualizing detection:..")
-        o3d.visualization.draw_geometries(
-            geometries,
-            window_name=f"Detection vs PCD",
-            lookat=np.array([0.0, 0.0, 0.0]),
-            front=np.array([0.0, 0.0, -1.0]),
-            up=np.array([0.0, -1.0, 0.0]),
-            zoom=0.8
-        )
+            # 7. Camera ray line (from camera plane to surface)
+            cam_plane = np.array([target_point[0], target_point[1], 0.0])
+            surface = np.array(target_point)
+            
+            # Create line from camera plane to surface
+            line_points = o3d.utility.Vector3dVector([cam_plane, surface])
+            line = o3d.geometry.LineSet(
+                points=line_points,
+                lines=o3d.utility.Vector2iVector([[0, 1]])
+            )
+            line.colors = o3d.utility.Vector3dVector([[0.0, 1.0, 1.0]])  # Cyan
+            geometries.append(line)
+            
+            # 8. Coordinate frame at origin
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
+            geometries.append(coord_frame)
+            
+            # Visualize
+            print(f"Visualizing detection vs point cloud: {ply_path}")
+            o3d.visualization.draw_geometries(
+                geometries,
+                window_name=f"Detection vs PCD: {os.path.basename(image_path)}",
+                lookat=np.array([0.0, 0.0, 0.0]),
+                front=np.array([0.0, 0.0, -1.0]),
+                up=np.array([0.0, -1.0, 0.0]),
+                zoom=0.8
+            )
+        else:
+            print("Empty point cloud:", ply_path)
     except Exception as e:
-        print(f"Error Visualizing: {e}")
+        print(f"Error loading PLY {ply_path}: {e}")
 
 
 
@@ -673,85 +661,6 @@ def find_best_grasp_point(mask_pcd):
     best_idx = np.argmin(distances)
     return points[best_idx]
 
-def flatout_mask_revised(
-    mask_pcd, 
-    og_pcd, 
-    surface_percentile=20, 
-    grid_resolution=50,
-    tolerance=0.02
-):
-    """
-    Cải tiến hàm flatout_mask:
-    1. Lấy đúng bề mặt trên cùng (gần camera nhất) bằng percentile thấp.
-    2. Lọc kết quả nội suy bằng Convex Hull để tránh tạo điểm "ảo" ở các góc.
-    """
-    if mask_pcd is None or og_pcd is None or len(mask_pcd.points) < 20 or len(og_pcd.points) == 0:
-        return mask_pcd
-
-    print("FLATTING OUT MASK (REVISED)")
-    
-    # --- Bước 1: Lấy bề mặt trên cùng của MASK_PCD ---
-    mask_points = np.asarray(mask_pcd.points)
-    z_coords = mask_points[:, 2]
-    # Lấy các điểm có Z nhỏ nhất (gần camera nhất)
-    top_surface_z_threshold = np.percentile(z_coords, surface_percentile)
-    top_surface_mask = z_coords <= top_surface_z_threshold
-    top_surface_points = mask_points[top_surface_mask]
-    
-    if len(top_surface_points) < 10:
-        return mask_pcd
-        
-    # --- Bước 2: Lấy các điểm liên quan từ OG_PCD ---
-    og_points = np.asarray(og_pcd.points)
-    x_min, x_max = np.min(top_surface_points[:, 0]), np.max(top_surface_points[:, 0])
-    y_min, y_max = np.min(top_surface_points[:, 1]), np.max(top_surface_points[:, 1])
-    
-    og_mask = (
-        (og_points[:, 0] >= x_min - tolerance) & (og_points[:, 0] <= x_max + tolerance) &
-        (og_points[:, 1] >= y_min - tolerance) & (og_points[:, 1] <= y_max + tolerance)
-    )
-    og_filtered_points = og_points[og_mask]
-    
-    if len(og_filtered_points) < 10:
-        return mask_pcd
-
-    # --- Bước 3: Nội suy để tạo mặt phẳng ---
-    try:
-        x_grid = np.linspace(x_min, x_max, grid_resolution)
-        y_grid = np.linspace(y_min, y_max, grid_resolution)
-        X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
-        
-        Z_interp = griddata(og_filtered_points[:, :2], og_filtered_points[:, 2], 
-                            (X_grid, Y_grid), method='linear')
-
-        interpolated_points = []
-        grid_points_2d = []
-        for i in range(X_grid.shape[0]):
-            for j in range(X_grid.shape[1]):
-                if not np.isnan(Z_interp[i, j]):
-                    interpolated_points.append([X_grid[i, j], Y_grid[i, j], Z_interp[i, j]])
-                    grid_points_2d.append([X_grid[i, j], Y_grid[i, j]])
-
-        if not interpolated_points:
-            return mask_pcd
-
-        # --- Lọc bằng Convex Hull ---
-        hull = Delaunay(top_surface_points[:, :2])
-        is_in_hull = hull.find_simplex(np.array(grid_points_2d)) >= 0
-        
-        final_points = np.array(interpolated_points)[is_in_hull]
-
-        if len(final_points) > 0:
-            flat_surface_pcd = o3d.geometry.PointCloud()
-            flat_surface_pcd.points = o3d.utility.Vector3dVector(final_points)
-            flat_surface_pcd.paint_uniform_color([0.0, 1.0, 0.0])
-            return flat_surface_pcd
-        else:
-            return mask_pcd
-            
-    except Exception as e:
-        print(f"Interpolation failed: {e}")
-        return mask_pcd
 
 def load_model(ckpt_path: str, device: torch.device = None):
     """Load OrientRegressPointNet from a checkpoint path.
@@ -787,7 +696,7 @@ def run_and_export(output_csv: str, split) -> None:
     print(f"[main] device={device}")
 
     orient_ckpt = r'D:\ViettelAI\Code\finetune_yolo\PointNet\pointnetPytorch\utils\checkpoints\orient_best.pth'
-    #orient_model, meta = load_model(orient_ckpt, device)
+    orient_model, meta = load_model(orient_ckpt, device)
 
 
 
@@ -842,19 +751,10 @@ def run_and_export(output_csv: str, split) -> None:
                     #visualize_detection(image_path, bbox_xyxy, z_d)
 
                     # DEPTH CAM FRAME
-                    mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=True, filter_patch=True, filter_bg=True)     
-                    points = np.asarray(mask_pcd.points)
-                    points = points @ T_MAT.T
-                    points[:, 2] -= (100/1000)
-                    mask_pcd.points = o3d.utility.Vector3dVector(points)
-
-                
-                    copy_pcd = o3d.geometry.PointCloud(mask_pcd.points)
-                    points = np.asarray(copy_pcd.points)
-                    points = points @ T_MAT.T
-                    points[:, 2] -= (300/1000)
-                    copy_pcd.points = o3d.utility.Vector3dVector(points)
-
+                    mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=True, filter_patch=True) # cloud
+                    
+                    #orient_pcd = mask_pcd.copy()
+                    
                     print('Cloud mask size: ', len(mask_pcd.points))
                     
                     #mask_pcd = transform_to_camera_frame(mask_pcd)
@@ -864,25 +764,9 @@ def run_and_export(output_csv: str, split) -> None:
                     if len(og_pcd.points) > 0:
                         # Transform to camera frame
                         pts_cloud = np.asarray(og_pcd.points)
-                        pts_cloud = pts_cloud @ T_MAT.T
-                        pts_cloud = pts_cloud[pts_cloud[:, 2] < 1.2]
-                        og_pcd.points = o3d.utility.Vector3dVector(pts_cloud)
-                        
-                        mask_pcd = flatout_mask_revised(mask_pcd, og_pcd)
-
-                        new_orient_mask = flatout_mask(copy_pcd, og_pcd)
-                        points = np.asarray(new_orient_mask.points)
-                        points[:, 2] -= (200/1000)
-                        new_orient_mask.points = o3d.utility.Vector3dVector(points)
-
-                        o3d.visualization.draw_geometries(
-                            [og_pcd, new_orient_mask, mask_pcd, copy_pcd],
-                            lookat=np.array([0.0, 0.0, 0.0]),
-                            front=np.array([0.0, 0.0, -1.0]),
-                            up=np.array([0.0, -1.0, 0.0]),
-                            zoom=0.8
-                        )
-
+                        pts_cam = pts_cloud @ T_MAT.T
+                        og_pcd.points = o3d.utility.Vector3dVector(pts_cam)
+                        mask_pcd = flatout_mask(mask_pcd, og_pcd)
                     else:
                         print("!!! NO FLAT SURFACE INTERPOLATION")
 
@@ -890,6 +774,7 @@ def run_and_export(output_csv: str, split) -> None:
                         if len(mask_pcd.points) > 0:
                             
                             x_cam, y_cam, z_cam = find_best_grasp_point(mask_pcd)
+                            
                             xyz_cam = [x_cam, y_cam, z_cam]
                             
                             print("xyz_cam: ",  [x_cam, y_cam, z_cam])
@@ -902,19 +787,20 @@ def run_and_export(output_csv: str, split) -> None:
                     
                         try:
                             
-                            normal_vector = compute_normal_from_points(mask_pcd, xyz_cam)
-                            # orient_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=False, filter_patch=True, filter_bg=False)
-                            # orient_pcd = flatout_mask(orient_pcd, og_pcd)
-                            # orient_pts = np.array(orient_pcd.points) # (N,3)
+                            #normal_vector = compute_normal_from_points(mask_pcd, xyz_cam)
+                            #orient_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=False, filter_patch=True)
+                            orient_pts = np.array(mask_pcd.points) # (N,3)
     
-                            # point_set = torch.from_numpy(orient_pts.astype(np.float32))
-                            # point_set = point_set.unsqueeze(0) # (1,N,3)
-                            # point_set = point_set.transpose(2,1).to(device) # (1, 3,N)
-                            # with torch.no_grad():
-                            #     pred_t, _, _ = orient_model(point_set) # (1,3)
+                            point_set = torch.from_numpy(orient_pts.astype(np.float32))
+                            point_set = point_set.unsqueeze(0) # (1,N,3)
+                            point_set = point_set.transpose(2,1).to(device) # (1, 3,N)
+                            with torch.no_grad():
+                                pred_t, _, _ = orient_model(point_set) # (1,3)
                             
-                            # normal_vector = pred_t.detach().cpu().numpy()[0]
+                            normal_vector = pred_t.detach().cpu().numpy()[0]
                         
+
+
                             if normal_vector is not None:
                                 normal_vector = np.asarray(normal_vector) 
                                
@@ -934,8 +820,7 @@ def run_and_export(output_csv: str, split) -> None:
                                 normal_vector = [rx,ry,rz]
                             
                             # visualize mask_pcd with estimated normal and X-axis
-                        
-                            #visualize_pcd_mask(image_path=None, orient_pcd=orient_pcd, mask_pcd=mask_pcd, target_point=xyz_cam, normal_vector=normal_vector)
+                            visualize_pcd_mask(image_path, mask_pcd, xyz_cam, normal_vector)
                             
 
                         except Exception as e:
@@ -977,7 +862,7 @@ def run_and_export(output_csv: str, split) -> None:
 if __name__ == "__main__":
     
 
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submissions_3D.csv")
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "train_pred.csv")
     print(f"Saving to {out_csv}")
-    run_and_export(out_csv, split='test')
+    run_and_export(out_csv, split='train')
 

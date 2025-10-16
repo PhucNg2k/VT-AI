@@ -24,7 +24,7 @@ def calculate_position_error(pred_pos: np.ndarray, gt_pos: np.ndarray) -> float:
     return np.linalg.norm(pred_pos - gt_pos)
 
 
-def calculate_orientation_error(pred_orient: np.ndarray, gt_orient: np.ndarray) -> float:
+def calculate_orientation_error(pred_orient: np.ndarray, gt_orient: np.ndarray, filename) -> float:
     """Calculate angle between predicted and ground truth orientation vectors (in degrees)."""
     # Normalize vectors
     pred_norm = pred_orient / np.linalg.norm(pred_orient)
@@ -37,7 +37,7 @@ def calculate_orientation_error(pred_orient: np.ndarray, gt_orient: np.ndarray) 
     angle_rad = np.arccos(dot_product)
     angle_deg = np.degrees(angle_rad)
 
-    print(f"Angle between predicted and ground truth orientation vectors: {angle_deg} degrees")
+    print(f"Angle between, {filename}: {angle_deg} degrees")
     return angle_deg
 
 
@@ -69,18 +69,18 @@ def evaluate_csvs(pred_csv_path: str, gt_csv_path: str) -> Tuple[float, float, f
         pred_pos = np.array([row['x_pred'], row['y_pred'], row['z_pred']])
         gt_pos = np.array([row['x_gt'], row['y_gt'], row['z_gt']])
         pos_error = calculate_position_error(pred_pos, gt_pos)
-        position_errors.append(pos_error)
+        position_errors.append( pos_error)
         
         # Orientation error
         pred_orient = np.array([row['Rx_pred'], row['Ry_pred'], row['Rz_pred']])
         gt_orient = np.array([row['Rx_gt'], row['Ry_gt'], row['Rz_gt']])
-        orient_error = calculate_orientation_error(pred_orient, gt_orient)
+        orient_error = calculate_orientation_error(pred_orient, gt_orient, row['image_filename'])
         orientation_errors.append(orient_error)
     
     # Calculate MCE and OE
     N = len(merged)
-    MCE = (1.0 / N) * sum(e_i / 50.0 for e_i in position_errors)
-    OE = (1.0 / N) * sum(theta_i / 20.0 for theta_i in orientation_errors)
+    MCE = (1.0 / N) * sum(  min(e_i / 50.0, 1) for e_i in position_errors)
+    OE = (1.0 / N) * sum( min(theta_i / 20.0, 1) for theta_i in orientation_errors)
     
     # Calculate final accuracy score
     AC = (1 - MCE) * 0.7 + (1 - OE) * 0.3

@@ -18,10 +18,12 @@ from typing import List, Dict, Any, Tuple
 import os
 import numpy as np
 import cv2
+import sys
 
-from Code.config import ROI, HEIGHT_TOL_MM, ROBOT_POS
-from Code.coord_utils import in_roi, dist_from_robot, bbox_center_from_xywhr, bbox_center_from_polygon
-from Code.file_utils import get_depth_pixel
+sys.path.append(r"D:\ViettelAI\Code")
+from config import ROI, HEIGHT_TOL_MM, ROBOT_POS
+from coord_utils import in_roi, dist_from_robot, bbox_center_from_xywhr, bbox_center_from_polygon
+from file_utils import get_depth_pixel
 
 
 def select_topmost_per_image(dets: List[Dict[str, Any]], split: str = 'train', direct=True) -> List[Tuple[str, Tuple[float, float], float, Dict[str, Any]]]:
