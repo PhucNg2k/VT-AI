@@ -839,7 +839,7 @@ def run_and_export(output_csv: str, split) -> None:
                 
                 else:
                     print("creating cloud mask")
-                    #visualize_detection(image_path, bbox_xyxy, z_d)
+                    visualize_detection(image_path, bbox_xyxy, z_d)
 
                     # DEPTH CAM FRAME
                     mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=True, filter_patch=True, filter_bg=True)     
