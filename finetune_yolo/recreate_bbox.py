@@ -18,7 +18,7 @@ sys.path.append(r"D:\ViettelAI\Code")
 from config import RGB_TEST, RGB_TRAIN
 from file_utils import get_file_list, get_depth_pixel, get_depth_pixel_batch as _get_depth_batch
 from phases.filter_phase import select_topmost_per_image
-from camera_config import get_cam_coord, COLOR_INTRINSIC, PLY_MATRIX, compute_homogen_transform, get_tmat_color2depth , DEPTH_INTRINSIC, get_pix_coord, R_MATRIX, ROI
+from camera_config import project_cam_to_pixel, get_cam_coord, COLOR_INTRINSIC, PLY_MATRIX, compute_homogen_transform, get_tmat_color2depth , DEPTH_INTRINSIC, get_pix_coord, R_MATRIX, ROI
 from finetune_yolo.model_utils import detect_in_area_batch, detect_on_original_image
 from finetune_yolo.PointNet.pointnetPytorch.pointnet.model import OrientRegressPointNet
 
@@ -75,8 +75,37 @@ def get_depth_correspond(image_path, coord):
 
     return float(depth_value)
 
-def strict_roi_cut(pcd):
+def get_roi_3d():
     x,y,w,h = ROI
+    top_left = get_cam_coord([x, y], COLOR_INTRINSIC)
+    top_right = get_cam_coord([x+w, y], COLOR_INTRINSIC)
+    bot_right = get_cam_coord([x+w, y+h], COLOR_INTRINSIC)
+    bot_left = get_cam_coord([x, y+h], COLOR_INTRINSIC)
+    return [top_left, top_right, bot_right, bot_left]
+
+def strict_roi_cut(pcd: o3d.geometry.PointCloud):
+    top_left, top_right, bot_right, bot_left = get_roi_3d()
+    points = np.array(pcd.points)
+
+    # only keep points x,y range of those points
+    # Get min/max bounds from the 4 ROI corners
+    x_min = min(top_left[0], top_right[0], bot_right[0], bot_left[0])
+    x_max = max(top_left[0], top_right[0], bot_right[0], bot_left[0])
+    y_min = min(top_left[1], top_right[1], bot_right[1], bot_left[1])
+    y_max = max(top_left[1], top_right[1], bot_right[1], bot_left[1])
+    
+    # Filter points within the ROI bounds
+    mask = (
+        (points[:, 0] >= x_min) & (points[:, 0] <= x_max) &
+        (points[:, 1] >= y_min) & (points[:, 1] <= y_max)
+    )
+    
+    # Return filtered point cloud
+    new_pcd = o3d.geometry.PointCloud()
+    filtered_points = points[mask]
+    new_pcd.points = o3d.utility.Vector3dVector(filtered_points)
+    
+    return new_pcd
 
 
 def create_detection_point_cloud_mask(image_path: str, det_sel, filter_dense: bool = True, filter_patch=True, filter_bg=True) -> o3d.geometry.PointCloud:
@@ -193,83 +222,30 @@ def calculate_orientation_error(pred_orient: np.ndarray, gt_orient: np.ndarray) 
     print(f"Angle between predicted and ground truth orientation vectors: {angle_deg} degrees")
     return angle_deg
 
-def compute_normal_from_points(mask_pcd, target_point):
+def compute_normal_from_points(mask_pcd):
     """
-    Compute orientation vector from flattened mask_pcd by identifying 4 corners
-    and computing object frame at target_point.
-    
-    Args:
-        mask_pcd: Point cloud mask of detected object (should be flattened rectangle)
-        target_point: Target point (centroid) where to compute orientation
-        
-    Returns:
-        orient_vec: Normal vector representing object orientation in camera frame
+    Compute surface normal (nx, ny, nz) from a smooth patch of point cloud.
     """
-    if mask_pcd is None or len(mask_pcd.points) == 0:
+    if mask_pcd is None:
         return None
     
-    import numpy as np
     
     # Get point cloud data
-    mask_pcd = preprocess_pcd(mask_pcd)
     points = np.asarray(mask_pcd.points)
-    print(f"Computing normal from {len(points)} points")
-    
-    # Find the 4 corners of the rectangle
-    # Method: Find extreme points in x and y directions
-    x_min_idx = np.argmin(points[:, 0])
-    x_max_idx = np.argmax(points[:, 0])
-    y_min_idx = np.argmin(points[:, 1])
-    y_max_idx = np.argmax(points[:, 1])
-    
-    # Get corner points
-    corner1 = points[x_min_idx]  # Leftmost point
-    corner2 = points[x_max_idx]  # Rightmost point
-    corner3 = points[y_min_idx]  # Bottommost point
-    corner4 = points[y_max_idx]  # Topmost point
-    
-    
-    # Compute orientation vectors relative to target_point
-    # Move corner points relative to target_point to form object frame
-    corner1_rel = corner1 - target_point  # Vector from target to corner1
-    corner2_rel = corner2 - target_point  # Vector from target to corner2
-    corner3_rel = corner3 - target_point  # Vector from target to corner3
-    corner4_rel = corner4 - target_point  # Vector from target to corner4
-    
-    # Compute two side vectors relative to target point
-    side1 = corner2_rel - corner1_rel  # Vector along one side relative to target
-    side2 = corner4_rel - corner3_rel  # Vector along other side relative to target
-    
-    # Determine which side is longer to establish x_axis and y_axis
-    side1_length = np.linalg.norm(side1)
-    side2_length = np.linalg.norm(side2)
-        
-    if side1_length >= side2_length:
-        # side1 is the long side (x_axis), side2 is the short side (y_axis)
-        x_axis = side1 / side1_length  # Normalize
-        y_axis = side2 / side2_length   # Normalize
-    else:
-        # side2 is the long side (x_axis), side1 is the short side (y_axis)
-        x_axis = side2 / side2_length  # Normalize
-        y_axis = side1 / side1_length  # Normalize
-    
-    # Compute normal vector using cross product of x_axis and y_axis
-    # This gives us the z-axis (normal to the surface)
-    orient_vec = np.cross(x_axis, y_axis)
-    
-    # Ensure the normal vector points towards the camera (negative z direction)
-    # This is typical for grasping applications
-    if orient_vec[2] < 0:
-        orient_vec = -orient_vec
-    
-    # Normalize the vector
-    orient_vec = orient_vec / np.linalg.norm(orient_vec)
-    
-    print(f"X-axis: {x_axis}")
-    print(f"Y-axis: {y_axis}")
-    print(f"Computed orientation vector: {orient_vec}")
-    return orient_vec
+    centroid = np.mean(points, axis=0)
+    pts_centered = points - centroid
 
+    cov = np.cov(pts_centered.T)   
+    eigvals, eigvecs = np.linalg.eigh(cov)
+
+    normal = eigvecs[:, np.argmin(eigvals)]
+    normal = normal / np.linalg.norm(normal)
+
+    if normal[2] < 0:
+        normal = -normal
+
+    print(f"Orient normal: {normal}")    
+    return normal
 
 
 def remove_small_clusters(
@@ -315,22 +291,24 @@ def preprocess_pcd(pcd: o3d.geometry.PointCloud, voxel_size: float = 0.001) -> o
     """
     Downsamples and cleans a point cloud by removing outliers.
     """
-    print(f"Original points: {len(pcd.points)}")
+    #print(f"Original points: {len(pcd.points)}")
     
     # 1. Downsample to create a uniform density
     pcd_down = pcd.voxel_down_sample(voxel_size)
-    print(f"After Voxel Downsampling: {len(pcd_down.points)}")
+    #print(f"After Voxel Downsampling: {len(pcd_down.points)}")
 
     
     # 3. Remove statistical outliers from the remaining points
     nb_neighbors = 150
     std_ratio = 2
     pcd_stat, _ = pcd_down.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-    print(f"After Statistical Outlier Removal: {len(pcd_stat.points)}")
+    #print(f"After Statistical Outlier Removal: {len(pcd_stat.points)}")
 
     #pcd_filtered = remove_small_clusters(pcd_stat, min_points=1000, eps=voxel_size * 10)
     return pcd_stat
 
+def estimate_normal_ransace(pcd):
+    pass
 
 
 def filter_cloud_mask_dbscan(detection_point: o3d.geometry.PointCloud, eps: float = 0.03, min_points: int = 20, voxel_size: float = 0.01) -> o3d.geometry.PointCloud:
@@ -369,6 +347,240 @@ def filter_cloud_mask_dbscan(detection_point: o3d.geometry.PointCloud, eps: floa
 
 
 
+def get_pointcloud_from_uv(rgb_path, center_uv_list):
+
+    depth_path = convert_path(rgb_path, src='rgb', target='depth')
+    depth_np = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+    
+    tmat_color2depth = get_tmat_color2depth()
+    color_3dpoints = []
+
+    for center_uv in center_uv_list:
+        xyz_cam = get_cam_coord(center_uv, COLOR_INTRINSIC)
+        depth_cam_coord = compute_homogen_transform(xyz_cam, tmat_color2depth)
+        depth_pix_coord = get_pix_coord(depth_cam_coord, DEPTH_INTRINSIC)
+
+        x_d = float(depth_cam_coord[0])
+        y_d = float(depth_cam_coord[1])
+
+        u_d, v_d = int(depth_pix_coord[0]), int(depth_pix_coord[1])
+
+        depth_value = float(depth_np[v_d, u_d][0]) 
+        z_d = depth_value / 1000    
+
+        color_3dpoints.append( [x_d, y_d, z_d] @ R_MATRIX.T)
+
+    return color_3dpoints    
+
+
+def cal_normal(intersection_point, long_end, short_end, rgb_path):
+    """Calculate normal vector from 3D points projected from 2D coordinates.
+    
+    Args:
+        intersection_point: (u, v) pixel coordinates of intersection
+        long_end: (u, v) pixel coordinates of long endpoint
+        short_end: (u, v) pixel coordinates of short endpoint
+        rgb_path: Path to RGB image for depth lookup
+        
+    Returns:
+        normal_vec: Normalized 3D normal vector (numpy array)
+    """
+    uv_list = [intersection_point, long_end, short_end]
+    
+    # Get 3D point cloud coordinates from 2D UV coordinates
+    inter_p, long_p, short_p = get_pointcloud_from_uv(rgb_path, uv_list)
+    
+    if inter_p is None or long_p is None or short_p is None:
+        print("Warning: Could not get 3D points for normal calculation")
+        return None
+    
+    # Calculate vectors from intersection to endpoints
+    long_vec = long_p - inter_p
+    short_vec = short_p - inter_p
+    
+    long_vec = long_vec/np.linalg.norm(long_vec)
+    long_vec = short_vec/np.linalg.norm(short_vec)
+    # Normal vector = cross product(long_vec, short_vec)
+    normal_vec = np.cross(long_vec, short_vec)
+    
+    # Normalize the normal vector
+    norm = np.linalg.norm(normal_vec)
+    if norm > 0:
+        normal_vec = normal_vec / norm
+    
+    if normal_vec[2] < 0:
+        normal_vec = - normal_vec
+    print(f"Normal vector: {normal_vec}")
+    
+    return normal_vec
+
+
+def refine_2d_mask(pixels: list, image_shape: tuple | None = None):
+    """Refine sparse/projected pixels into a rectangle approximation.
+
+    Fits a minimum-area rectangle (can be rotated) around the provided pixels.
+    Also returns an axis-aligned bounding box as a fallback and, if
+    image_shape is given, a filled mask of the rotated rectangle.
+
+    Args:
+        pixels: List of (u, v) integer pixel coordinates.
+        image_shape: Optional (H, W) to generate a filled mask.
+
+    Returns:
+        result: dict with keys:
+            - rotated_box: np.ndarray of shape (4, 2) int32, rectangle corners
+            - bbox_xyxy: (x1, y1, x2, y2) int tuple, axis-aligned
+            - mask (optional): np.ndarray uint8 of shape (H, W), if image_shape provided
+    """
+    result = {
+        'rotated_box': None,
+        'bbox_xyxy': None
+    }
+
+    if not pixels:
+        return result
+
+    pts = np.asarray(pixels, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        # Invalid input shape
+        return result
+
+    # Axis-aligned bbox (fallback / also returned)
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+    x1 = int(np.floor(xs.min()))
+    y1 = int(np.floor(ys.min()))
+    x2 = int(np.ceil(xs.max()))
+    y2 = int(np.ceil(ys.max()))
+    result['bbox_xyxy'] = (x1, y1, x2, y2)
+
+    # For minAreaRect we need a contour of shape (N, 1, 2)
+    contour = pts.reshape(-1, 1, 2)
+
+    if len(pts) >= 3:
+        rect = cv2.minAreaRect(contour)  # (center(x,y), (w,h), angle)
+        box = cv2.boxPoints(rect)        # (4, 2) float
+        box = np.int32(np.round(box))
+        result['rotated_box'] = box
+    else:
+        # Too few points for a stable rotated rectangle; approximate by AABB corners
+        box = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
+        result['rotated_box'] = box
+
+    if image_shape is not None and isinstance(image_shape, (tuple, list)) and len(image_shape) >= 2:
+        H, W = int(image_shape[0]), int(image_shape[1])
+        mask = np.zeros((H, W), dtype=np.uint8)
+        cv2.fillPoly(mask, [result['rotated_box']], 255)
+        result['mask'] = mask
+
+    return result
+
+def recreate_bbox_from_pcd(pcd, rgb_path, external_bbox):
+    """Project 3D mask (pcd) to 2D RGB image and draw its bbox.
+
+    Args:
+        pcd: open3d.geometry.PointCloud in the same frame as used in pipeline (before visualization).
+        rgb_path: Path to the RGB image file to draw on.
+
+    Returns:
+        drawn_img: Image with projected points and bounding box drawn (BGR np.ndarray).
+        bbox_xyxy: (x1, y1, x2, y2) int tuple in pixel coordinates, or None if no valid projections.
+    """
+    # Load image
+    
+    drawn_img = cv2.imread(rgb_path)
+    og_img = drawn_img.copy()
+
+    if drawn_img is None:
+        print("rgb image not found")
+        return None, None
+
+    h, w = drawn_img.shape[:2]
+
+    # Extract points and flip axes back to color camera frame using PLY->color T_MAT
+    points = np.array(pcd.points)
+    if points.size == 0:
+        print("pcd size 0")
+        return drawn_img, None
+
+    # Convert to color camera axis convention
+    points_color = points #@ T_MAT.T
+
+    # Project to color image pixels; keep only valid forward-facing points
+    proj_pixels = []
+    for p in points_color:
+        uv = project_cam_to_pixel(p, COLOR_INTRINSIC)
+        if uv is None:
+            continue
+        u_f, v_f = float(uv[0]), float(uv[1])
+        u_i, v_i = int(round(u_f)), int(round(v_f))
+        if 0 <= u_i < w and 0 <= v_i < h:
+            proj_pixels.append((u_i, v_i))
+
+    if not proj_pixels:
+        return drawn_img, None
+
+    refined = refine_2d_mask(proj_pixels, (h, w))
+
+# Draw refined rectangle
+    if refined['rotated_box'] is not None:
+        #cv2.drawContours(drawn_img, [refined['rotated_box']], -1, (0, 255, 0), 2)
+        
+        # Identify and label long/short sides of the parcel
+        box = refined['rotated_box']
+        top_left, top_right, bot_right, bot_left = box
+
+        intersection = top_left
+
+        dist1 = np.linalg.norm(top_right - intersection)
+        dist2 = np.linalg.norm(bot_left - intersection)
+
+        if dist1 > dist2:
+            long_p2 = top_right
+            short_p2 = bot_left
+        else:
+            long_p2 = bot_left
+            short_p2 = top_right
+    
+        
+        
+        # Draw the 3 key points
+        # cv2.circle(drawn_img, tuple(intersection), 8, (0, 255, 255), -1)  # Cyan circle for intersection
+        # cv2.circle(drawn_img, tuple(long_p2), 6, (255, 255, 0), -1)      # Yellow circle for long endpoint
+        # cv2.circle(drawn_img, tuple(short_p2), 6, (255, 0, 255), -1)     # Magenta circle for short endpoint
+        
+        # # Draw lines from intersection to endpoints
+        # cv2.line(drawn_img, tuple(intersection), tuple(long_p2), (255, 255, 0), 3)   # Yellow line for long
+        # cv2.line(drawn_img, tuple(intersection), tuple(short_p2), (255, 0, 255), 3)  # Magenta line for short
+        
+        # # Draw labels
+        # cv2.putText(drawn_img, 'INTERSECTION', tuple(intersection), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        # cv2.putText(drawn_img, 'LONG', tuple(long_p2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        # cv2.putText(drawn_img, 'SHORT', tuple(short_p2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+
+
+    # Compute bbox
+    # us = [u for (u, _) in proj_pixels]
+    # vs = [v for (_, v) in proj_pixels]
+    # x1, y1 = int(np.min(us)), int(np.min(vs))
+    # x2, y2 = int(np.max(us)), int(np.max(vs))
+
+    # # Draw bbox
+    # #cv2.rectangle(drawn_img, (x1, y1), (x2, y2), (0, 0, 255), 2) # red
+    
+    # x1,y1,x2,y2 = list(map(int, external_bbox)) 
+    # cv2.rectangle(drawn_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # blue
+
+    # print("image drawn")
+    # cv2.imshow('Projected 3D mask', drawn_img)
+    # #cv2.imshow('Original img', og_img)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+    
+    normal_vec = cal_normal(intersection, long_p2, short_p2, rgb_path)
+    return normal_vec
+
+    return drawn_img, (x1, y1, x2, y2)
 
 def rgb_to_ply_path(rgb_path: str) -> str:
     base = os.path.splitext(os.path.basename(rgb_path))[0]
@@ -378,7 +590,12 @@ def rgb_to_ply_path(rgb_path: str) -> str:
 
 
 
-
+def adjust_height_point(pcd, delta):
+    points = np.asarray(pcd.points)
+    points[:, 2] += delta
+    target = o3d.geometry.PointCloud()
+    target.points = o3d.utility.Vector3dVector(points)
+    return target
 
 def flatout_mask(mask_pcd, og_pcd):
     """
@@ -661,7 +878,7 @@ def filter_in_ROI(pts_cloud):
 
     pts_cloud = pts_cloud[pts_cloud[:, 0] > -0.5]
     pts_cloud = pts_cloud[pts_cloud[:, 0] < 0.353]
-    print("FILTERED IN ROI")
+    #print("FILTERED IN ROI")
     return pts_cloud
 
 
@@ -674,24 +891,8 @@ def region_growing_segmentation(
     ref_point: List[float],
     search_radius: float = 0.01
 ) -> Optional[o3d.geometry.PointCloud]:
-    """
-    Performs region growing segmentation from a single reference point.
-
-    It starts from the point in the cloud closest to ref_point and expands
-    outwards, collecting all connected points within the search_radius until
-    no more points can be added.
-
-    Args:
-        pcd: The input point cloud (potentially with multiple objects).
-        ref_point: A list of 3 floats [x, y, z] to start the search from.
-        search_radius: The "connection distance". If two points are closer than
-                       this, they are considered connected.
-
-    Returns:
-        A new point cloud containing only the target object, or None if no object is found.
-    """
     if not pcd.has_points() or len(ref_point) != 3:
-        print("Warning: Input point cloud is empty or reference point is invalid.")
+        print(f"Warning: Input point cloud is empty ({len(pcd.points) if pcd.has_points() else 0} points) or reference point is invalid ({ref_point}).")
         return None
 
     # --- Step 1: Build a KD-Tree for fast neighbor searches ---
@@ -702,7 +903,7 @@ def region_growing_segmentation(
     # Find the point in `pcd` that is closest to our `ref_point`.
     [k, idx, _] = pcd_tree.search_knn_vector_3d(np.array(ref_point), 1)
     if not idx:
-        print("Could not find a starting point in the cloud near the reference point.")
+        print(f"Could not find a starting point in the cloud near the reference point {ref_point}.")
         return None
     
     start_index = idx[0]
@@ -713,7 +914,7 @@ def region_growing_segmentation(
     queue = [start_index]
     visited_indices = {start_index} # Use a set for fast checking
 
-    print(f"Starting region growing from point index {start_index}...")
+    #print(f"Starting region growing from point index {start_index}...")
 
     while queue:
         # Get the next point to process
@@ -732,77 +933,15 @@ def region_growing_segmentation(
 
     # --- Step 4: Return the final object ---
     if visited_indices:
-        print(f"Region growing finished. Found an object with {len(visited_indices)} points.")
+       # print(f"Region growing finished. Found an object with {len(visited_indices)} points.")
         # Select all the points that were visited and return them as a new point cloud
         target_object_pcd = pcd.select_by_index(list(visited_indices))
         return target_object_pcd
     else:
+        print("NONE REGION OBJECT")
         return None
 
-def preprocess_final_mask(
-    cluster_pcd: o3d.geometry.PointCloud, 
-    ref_point: List[float],
-    eps: float = 0.005,
-    min_points: int = 50
-) -> Optional[o3d.geometry.PointCloud]:
-    """
-    Selects the correct object patch from a dense point cloud using a single reference point.
-
-    Args:
-        cluster_pcd: The dense point cloud which may contain multiple objects/noise.
-        ref_point: A list of 3 floats [x, y, z] known to be on or near the target object.
-        eps: The density parameter (epsilon) for DBSCAN.
-        min_points: The minimum number of points to form a cluster in DBSCAN.
-
-    Returns:
-        A new point cloud containing only the target object, or None if no object is found.
-    """
-    if not cluster_pcd.has_points() or len(ref_point) != 3:
-        print("Warning: Input cluster is empty or reference point is invalid.")
-        return None
-
-    # --- Step 1: Run DBSCAN to find all distinct objects ---
-    print("Running DBSCAN to find all potential objects...")
-    labels = np.array(cluster_pcd.cluster_dbscan(eps=eps, min_points=min_points, print_progress=False))
-
-    # Filter out the noise label (-1) to get only valid cluster labels
-    cluster_labels = np.unique(labels[labels != -1])
-    
-    if len(cluster_labels) == 0:
-        print("DBSCAN found no valid clusters (only noise).")
-        return None
-    
-    print(f"Found {len(cluster_labels)} potential object(s).")
-
-    # --- Step 2: Find which cluster is closest to the reference point ---
-    ref_point_np = np.array(ref_point)
-    best_cluster_label = -1
-    min_distance = float('inf')
-
-    for label in cluster_labels:
-        # Get the points belonging to the current cluster
-        indices = np.where(labels == label)[0]
-        temp_cluster = cluster_pcd.select_by_index(indices)
-        
-        # Calculate the distance from this cluster's center to the reference point
-        cluster_center = temp_cluster.get_center()
-        distance = np.linalg.norm(ref_point_np - cluster_center)
-        
-        if distance < min_distance:
-            min_distance = distance
-            best_cluster_label = label
-
-    # --- Step 3: Return only the point cloud of the best cluster ---
-    if best_cluster_label != -1:
-        print(f"Target object identified as cluster {best_cluster_label} with distance {min_distance:.4f}.")
-        target_indices = np.where(labels == best_cluster_label)[0]
-        target_object_pcd = cluster_pcd.select_by_index(target_indices)
-        return target_object_pcd
-    else:
-        # This case should not be reached if there is at least one cluster
-        print("Could not identify a target object.")
-        return None
-    
+   
 import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
@@ -811,132 +950,10 @@ import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
 
-def visualize_clusters_in_plane_footprint(
-    pcd: o3d.geometry.PointCloud,
-    plane_distance_thresh: float = 0.01,
-    ransac_n: int = 3,
-    ransac_iter: int = 1000,
-    cluster_eps: float = 0.05,
-    cluster_min_points: int = 50,
-    padding: float = 0.0  # Thêm một chút đệm (mét) cho footprint
-):
-    """
-    Thực hiện quy trình 3 bước:
-    1. Tìm mặt phẳng nền (nền xám) bằng RANSAC.
-    2. Lấy hình chiếu 2D (x,y) của mặt phẳng đó và "cắt" toàn bộ point cloud
-       theo hình chiếu này.
-    3. Chạy RANSAC + DBSCAN trên đám mây đã "cắt" và trực quan hóa.
-    """
-    
-    geometries_to_draw = []
 
-    # --- Bước 1: Tìm mặt phẳng nền LỚN NHẤT (từ PCD gốc) ---
-    print("Bước 1: Đang tìm mặt phẳng nền chính...")
-    try:
-        plane_model, inlier_indices = pcd.segment_plane(
-            distance_threshold=plane_distance_thresh,
-            ransac_n=ransac_n,
-            num_iterations=ransac_iter
-        )
-        plane_pcd = pcd.select_by_index(inlier_indices)
-        if len(plane_pcd.points) < 100: # Cần đủ điểm để tin cậy
-            raise Exception("Mặt phẳng tìm thấy quá nhỏ.")
-        print(f"Tìm thấy mặt phẳng nền với {len(plane_pcd.points)} điểm.")
-    except Exception as e:
-        print(f"Không tìm thấy mặt phẳng nền: {e}. Đang trực quan hóa toàn bộ.")
-        o3d.visualization.draw_geometries([pcd])
-        return
+def ransac_plane_segmentation(pcd):
+    pass
 
-    # --- Bước 2: Lấy hình chiếu 2D (Footprint) của mặt phẳng ---
-    plane_points = np.asarray(plane_pcd.points)
-    x_min, x_max = np.min(plane_points[:, 0]), np.max(plane_points[:, 0])
-    y_min, y_max = np.min(plane_points[:, 1]), np.max(plane_points[:, 1])
-    
-    # Áp dụng padding (đệm)
-    x_min -= padding
-    y_min -= padding
-    x_max += padding
-    y_max += padding
-    
-    print(f"Footprint 2D: X_range ({x_min:.2f}, {x_max:.2f}), Y_range ({y_min:.2f}, {y_max:.2f})")
-
-    # --- Bước 3: "Cắt" Point Cloud gốc theo Footprint ---
-    all_points = np.asarray(pcd.points)
-    mask = (
-        (all_points[:, 0] >= x_min) & (all_points[:, 0] <= x_max) &
-        (all_points[:, 1] >= y_min) & (all_points[:, 1] <= y_max)
-    )
-    indices_to_keep = np.where(mask)[0]
-    cut_pcd = pcd.select_by_index(indices_to_keep)
-    
-    if len(cut_pcd.points) == 0:
-        print("Không có điểm nào nằm trong footprint 2D.")
-        return
-        
-    print(f"Đã cắt, còn lại {len(cut_pcd.points)} điểm.")
-
-    # --- Bước 4: Chạy RANSAC + DBSCAN trên đám mây đã "Cắt" ---
-    print("Bước 4: Đang chạy RANSAC + DBSCAN trên đám mây đã cắt...")
-    try:
-        # Chạy RANSAC lần 2, chỉ trên các điểm đã cắt
-        cut_plane_model, cut_inlier_indices = cut_pcd.segment_plane(
-            distance_threshold=plane_distance_thresh,
-            ransac_n=ransac_n,
-            num_iterations=ransac_iter
-        )
-        
-        cut_plane_pcd = cut_pcd.select_by_index(cut_inlier_indices)
-        cut_objects_pcd = cut_pcd.select_by_index(cut_inlier_indices, invert=True)
-        
-        print(f"RANSAC (lần 2) thành công: {len(cut_plane_pcd.points)} điểm nền.")
-        
-        # Tô màu xám cho mặt phẳng đã cắt
-        cut_plane_pcd.paint_uniform_color([0.5, 0.5, 0.5]) 
-        #geometries_to_draw.append(cut_plane_pcd)
-
-    except Exception as e:
-        print(f"RANSAC (lần 2) thất bại ({e}). Chạy DBSCAN trên toàn bộ điểm đã cắt.")
-        cut_objects_pcd = cut_pcd # Coi tất cả các điểm đã cắt là vật thể
-
-    # Chạy DBSCAN trên các vật thể đã cắt
-    if len(cut_objects_pcd.points) == 0:
-        print("Không còn điểm vật thể nào sau khi cắt.")
-        #o3d.visualization.draw_geometries(geometries_to_draw)
-        return
-        
-    print(f"Đang chạy DBSCAN trên {len(cut_objects_pcd.points)} điểm vật thể đã cắt...")
-    labels = np.array(cut_objects_pcd.cluster_dbscan(
-        eps=cluster_eps,
-        min_points=cluster_min_points,
-        print_progress=False
-    ))
-
-    max_label = labels.max()
-    print(f"DBSCAN tìm thấy {max_label + 1} cụm.")
-
-    # --- Bước 5: Tô màu và trực quan hóa ---
-    colors = plt.get_cmap("hsv")(np.linspace(0, 1, max_label + 1))[:, :3]
-
-    for i in range(max_label + 1):
-        cluster_indices = np.where(labels == i)[0]
-        if len(cluster_indices) == 0:
-            continue
-            
-        cluster_pcd = cut_objects_pcd.select_by_index(cluster_indices)
-        cluster_pcd.paint_uniform_color(colors[i])
-        geometries_to_draw.append(cluster_pcd)
-
-    return geometries_to_draw
-
-    noise_indices = np.where(labels == -1)[0]
-    if len(noise_indices) > 0:
-        noise_pcd = cut_objects_pcd.select_by_index(noise_indices)
-        noise_pcd.paint_uniform_color([0.0, 0.0, 0.0]) # Màu đen
-        geometries_to_draw.append(noise_pcd)
-        print(f"Có {len(noise_indices)} điểm nhiễu (màu đen).")
-
-    print("Đang mở cửa sổ trực quan hóa... (Nhấn 'Q' để đóng)")
-    o3d.visualization.draw_geometries(geometries_to_draw)
 
 def find_best_grasp_point(mask_pcd):
     points = np.asarray(mask_pcd.points)
@@ -951,85 +968,6 @@ def find_best_grasp_point(mask_pcd):
     best_idx = np.argmin(distances)
     return points[best_idx]
 
-def flatout_mask_revised(
-    mask_pcd, 
-    og_pcd, 
-    surface_percentile=20, 
-    grid_resolution=50,
-    tolerance=0.02
-):
-    """
-    Cải tiến hàm flatout_mask:
-    1. Lấy đúng bề mặt trên cùng (gần camera nhất) bằng percentile thấp.
-    2. Lọc kết quả nội suy bằng Convex Hull để tránh tạo điểm "ảo" ở các góc.
-    """
-    if mask_pcd is None or og_pcd is None or len(mask_pcd.points) < 20 or len(og_pcd.points) == 0:
-        return mask_pcd
-
-    print("FLATTING OUT MASK (REVISED)")
-    
-    # --- Bước 1: Lấy bề mặt trên cùng của MASK_PCD ---
-    mask_points = np.asarray(mask_pcd.points)
-    z_coords = mask_points[:, 2]
-    # Lấy các điểm có Z nhỏ nhất (gần camera nhất)
-    top_surface_z_threshold = np.percentile(z_coords, surface_percentile)
-    top_surface_mask = z_coords <= top_surface_z_threshold
-    top_surface_points = mask_points[top_surface_mask]
-    
-    if len(top_surface_points) < 10:
-        return mask_pcd
-        
-    # --- Bước 2: Lấy các điểm liên quan từ OG_PCD ---
-    og_points = np.asarray(og_pcd.points)
-    x_min, x_max = np.min(top_surface_points[:, 0]), np.max(top_surface_points[:, 0])
-    y_min, y_max = np.min(top_surface_points[:, 1]), np.max(top_surface_points[:, 1])
-    
-    og_mask = (
-        (og_points[:, 0] >= x_min - tolerance) & (og_points[:, 0] <= x_max + tolerance) &
-        (og_points[:, 1] >= y_min - tolerance) & (og_points[:, 1] <= y_max + tolerance)
-    )
-    og_filtered_points = og_points[og_mask]
-    
-    if len(og_filtered_points) < 10:
-        return mask_pcd
-
-    # --- Bước 3: Nội suy để tạo mặt phẳng ---
-    try:
-        x_grid = np.linspace(x_min, x_max, grid_resolution)
-        y_grid = np.linspace(y_min, y_max, grid_resolution)
-        X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
-        
-        Z_interp = griddata(og_filtered_points[:, :2], og_filtered_points[:, 2], 
-                            (X_grid, Y_grid), method='linear')
-
-        interpolated_points = []
-        grid_points_2d = []
-        for i in range(X_grid.shape[0]):
-            for j in range(X_grid.shape[1]):
-                if not np.isnan(Z_interp[i, j]):
-                    interpolated_points.append([X_grid[i, j], Y_grid[i, j], Z_interp[i, j]])
-                    grid_points_2d.append([X_grid[i, j], Y_grid[i, j]])
-
-        if not interpolated_points:
-            return mask_pcd
-
-        # --- Lọc bằng Convex Hull ---
-        hull = Delaunay(top_surface_points[:, :2])
-        is_in_hull = hull.find_simplex(np.array(grid_points_2d)) >= 0
-        
-        final_points = np.array(interpolated_points)[is_in_hull]
-
-        if len(final_points) > 0:
-            flat_surface_pcd = o3d.geometry.PointCloud()
-            flat_surface_pcd.points = o3d.utility.Vector3dVector(final_points)
-            flat_surface_pcd.paint_uniform_color([0.0, 1.0, 0.0])
-            return flat_surface_pcd
-        else:
-            return mask_pcd
-            
-    except Exception as e:
-        print(f"Interpolation failed: {e}")
-        return mask_pcd
 
 def load_model(ckpt_path: str, device: torch.device = None):
     """Load OrientRegressPointNet from a checkpoint path.
@@ -1057,6 +995,38 @@ def load_model(ckpt_path: str, device: torch.device = None):
     }
     print(f"[load] loaded. meta={meta}")
     return model, meta
+
+
+
+def estimate_normal(pcd, ref_pc):
+    print("Recompute the normal of the downsampled point cloud")
+    
+    # Check if point cloud has points
+    if len(pcd.points) == 0:
+        print("Warning: Empty point cloud")
+        return None
+    
+    # Estimate normals for the entire point cloud
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.01,
+                                                          max_nn=30))
+    ref_pc = np.array(ref_pc)
+    points = np.array(pcd.points)
+    
+    # Find the closest point to ref_pc instead of exact match
+    distances = np.linalg.norm(points - ref_pc, axis=1)
+    closest_idx = np.argmin(distances)
+    
+    # Get the normal vector at the closest point
+    normals = np.array(pcd.normals)
+    normal_vec = normals[closest_idx]
+    
+    # Ensure normal points in positive z direction (towards camera)
+    if normal_vec[2] < 0:
+        normal_vec = -normal_vec
+    
+    return normal_vec
+
 
 import matplotlib.pyplot as plt
 def eda_pointcloud(points):
@@ -1105,10 +1075,7 @@ def run_and_export(output_csv: str, split) -> None:
     print(f"[main] device={device}")
 
     orient_ckpt = r'D:\ViettelAI\Code\finetune_yolo\PointNet\pointnetPytorch\utils\checkpoints\orient_best.pth'
-    #orient_model, meta = load_model(orient_ckpt, device)
-
-
-
+    orient_model, meta = load_model(orient_ckpt, device)
 
     checkpoint_root = os.path.join(os.path.dirname(__file__), 'checkpoint')
     weights = find_latest_checkpoint(checkpoint_root)
@@ -1159,36 +1126,20 @@ def run_and_export(output_csv: str, split) -> None:
                     print("creating cloud mask")
                     #visualize_detection(image_path, bbox_xyxy, z_d)
 
-                    # DEPTH CAM FRAME
-                    mask_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=True, filter_patch=True, filter_bg=True)     
-                    points = np.asarray(mask_pcd.points)
-                    points = points @ T_MAT.T
-                    points[:, 2] -= 0.01
-                    mask_pcd.points = o3d.utility.Vector3dVector(points)
-                    x_cam, y_cam, z_cam = find_best_grasp_point(mask_pcd)
-
-                
-                    copy_mask_pcd = o3d.geometry.PointCloud(mask_pcd.points)
-                    points = np.asarray(copy_mask_pcd.points)
-                    #points = points @ T_MAT.T
-                    points[:, 2] += 0.03
-                    copy_mask_pcd.points = o3d.utility.Vector3dVector(points)
-                    print('Cloud mask size: ', len(mask_pcd.points))
-
-        
-                    
-                    
-                    #mask_pcd = transform_to_camera_frame(mask_pcd)
-
+    
                     ply_path = convert_path(image_path, src='rgb', target='ply')
                     og_pcd = o3d.io.read_point_cloud(ply_path)
 
+                    copy_pcd = o3d.io.read_point_cloud(ply_path)
+                    pts_cloud = np.asarray(copy_pcd.points)
+                    pts_cloud = pts_cloud @ T_MAT.T
+                    copy_pcd.points = o3d.utility.Vector3dVector(pts_cloud)
 
-                    flatted_mask = flatout_mask(copy_mask_pcd, o3d.geometry.PointCloud(og_pcd.points))
-                    points = np.asarray(flatted_mask.points)
-                    points = points @ T_MAT.T
-                    points[:, 2] += 0.02
-                    flatted_mask.points = o3d.utility.Vector3dVector(points)
+                    # flatted_mask = flatout_mask(copy_mask_pcd, o3d.geometry.PointCloud(og_pcd.points))
+                    # points = np.asarray(flatted_mask.points)
+                    # points = points @ T_MAT.T
+                    # points[:, 2] += 0.02
+                    # flatted_mask.points = o3d.utility.Vector3dVector(points)
 
                     if len(og_pcd.points) > 0:
                         # Transform to camera frame
@@ -1199,59 +1150,25 @@ def run_and_export(output_csv: str, split) -> None:
                         og_pcd.points = o3d.utility.Vector3dVector(pts_cloud)
                         og_pcd = preprocess_pcd(og_pcd, voxel_size=0.001)
 
-                        eda_pointcloud(og_pcd.points)
-
-                        final_mask = region_growing_segmentation(og_pcd, xyz_cam, search_radius=0.005)
-                        #final_mask = preprocess_pcd(largest_cluster, voxel_size=0.001)
-                        points = np.asarray(final_mask.points)
-                        points[:, 2] -= 0.3
-                        target_cluster = o3d.geometry.PointCloud()
-                        target_cluster.points = o3d.utility.Vector3dVector(points)
-
-                        
-                        #mask_pcd = flatout_mask_revised(mask_pcd, og_pcd)
-
-                        # new_orient_mask = flatout_mask(copy_pcd, og_pcd)
-                        # points = np.asarray(new_orient_mask.points)
-                        # points[:, 2] -= (200/1000)
-                        # new_orient_mask.points = o3d.utility.Vector3dVector(points)
-
                         #eda_pointcloud(og_pcd.points)
-                        # cluster_to_draw = visualize_clusters_in_plane_footprint(o3d.geometry.PointCloud(og_pcd.points))
 
-                    
-                        # total_points  = []
-                        # for cluster in cluster_to_draw:
-                        #     points = np.asarray(cluster.points)
-                        #     points[:, 2] -= 0.2
-                        #     total_points.extend(points)
-                        #     #cluster.points = o3d.utility.Vector3dVector(points)
-                        # total_cluster = o3d.geometry.PointCloud()
-                        # total_cluster.points = o3d.utility.Vector3dVector(np.asarray(total_points))
+                        cutted_pcd = strict_roi_cut(og_pcd)
+                        final_mask = region_growing_segmentation(cutted_pcd, xyz_cam, search_radius=0.005)
 
-                        # final_cluster = remove_small_clusters(total_cluster, min_points=1000)
-
-                        # largest_cluster = filter_cluster(cluster_to_draw)
-
-                        #final_mask = region_growing_segmentation(largest_cluster, xyz_cam, search_radius=0.015)
-                        #final_mask = preprocess_pcd(largest_cluster, voxel_size=0.001)
+                        if final_mask is None or len(final_mask.points) == 0:
+                            final_mask = cutted_pcd
+                            if len(final_mask.points) == 0:
+                                final_mask = og_pcd
                         
-                        #points = np.asarray(final_mask.points)
-                        #points[:, 2] -= 0.3
-                        #largest_cluster.points = o3d.utility.Vector3dVector(points)
+                        
+                        #final_mask = preprocess_pcd(largest_cluster, voxel_size=0.001)
 
-
-                        #cluster_to_draw_1 = filter_cloud_mask_dbscan(largest_cluster)
-                        # for cluster in [cluster_to_draw_1]:
-                        #     points = np.asarray(cluster.points)
-                        #     points[:, 2] -= 0.4
-                        #     cluster.points = o3d.utility.Vector3dVector(points)
-
-
-
-
+                        #cutted_pcd = adjust_height_point(cutted_pcd, delta=-0.3)
+                        #final_mask = adjust_height_point(final_mask, delta= -0.4)
+                        
                         #og_pcd.paint_uniform_color([0.5, 0.5, 0.5]) 
-                        o3d.visualization.draw_geometries([ og_pcd, target_cluster ])
+                        #o3d.visualization.draw_geometries([ og_pcd,cutted_pcd, final_mask ])
+
                         # o3d.visualization.draw_geometries(
                         #     [og_pcd],
                         #     lookat=np.array([-1.0, -1.0, 1.3]),
@@ -1264,55 +1181,49 @@ def run_and_export(output_csv: str, split) -> None:
                         print("!!! NO FLAT SURFACE INTERPOLATION")
 
                     try:
-                        if len(mask_pcd.points) > 0:
-                            
-                            x_cam, y_cam, z_cam = find_best_grasp_point(mask_pcd)
-                            xyz_cam = [x_cam, y_cam, z_cam]
-                            
-                            print("xyz_cam: ",  [x_cam, y_cam, z_cam])
+                    
+                        x_cam, y_cam, z_cam = find_best_grasp_point(final_mask)
+                        xyz_cam = [x_cam, y_cam, z_cam]
+                        
+                        print("xyz_cam: ",  [x_cam, y_cam, z_cam])
                     except Exception as e:
                         print("error cloud mask: ", e)
                         pass
                     
-                    if len(mask_pcd.points) > 0:
+                    
+                    if len(final_mask.points) > 0:
                         normal_vector = None
                     
                         try:
-                            
-                            normal_vector = compute_normal_from_points(mask_pcd, xyz_cam)
-                            # orient_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=False, filter_patch=True, filter_bg=False)
+                            normal_vector = recreate_bbox_from_pcd(final_mask, image_path, bbox_xyxy)
+                            #normal_vector = compute_normal_from_points(final_mask)
+
+                            #normal_vector = estimate_normal(final_mask, xyz_cam )
+
+                            #orient_pcd = create_detection_point_cloud_mask(image_path, det_sel, filter_dense=False, filter_patch=True, filter_bg=False)
                             # orient_pcd = flatout_mask(orient_pcd, og_pcd)
-                            # orient_pts = np.array(orient_pcd.points) # (N,3)
+                            
+                            # orient_pts = np.array(final_mask.points) # (N,3)
     
                             # point_set = torch.from_numpy(orient_pts.astype(np.float32))
                             # point_set = point_set.unsqueeze(0) # (1,N,3)
-                            # point_set = point_set.transpose(2,1).to(device) # (1, 3,N)
+                            # point_set = point_set.transpose(2,1).to(device) # (1, 3, N)
                             # with torch.no_grad():
                             #     pred_t, _, _ = orient_model(point_set) # (1,3)
                             
-                            # normal_vector = pred_t.detach().cpu().numpy()[0]
+                            #normal_vector = pred_t.detach().cpu().numpy()[0]
                         
                             if normal_vector is not None:
                                 normal_vector = np.asarray(normal_vector) 
-                               
-                                # Use the normal vector directly as rx, ry, rz
-                                # The normal vector is already oriented with X as parcel long side
-                                #normal_vector = 0,0,1
-
-                                # angle_error = calculate_orientation_error(normal_vector, [0,0,1])
-                                # if angle_error < 10:
-                                #     normal_vector = np.array([0,0,1])
-                                #     print("normal set to [0,0,1]")
-
                                 rx, ry, rz = normal_vector
-                                
                             else:
                                 rx, ry, rz = 0.0, 0.0, 1.0  # fallback
                                 normal_vector = [rx,ry,rz]
                             
                             # visualize mask_pcd with estimated normal and X-axis
-                        
-                            #visualize_pcd_mask(image_path=None, orient_pcd=orient_pcd, mask_pcd=mask_pcd, target_point=xyz_cam, normal_vector=normal_vector)
+                            final_mask = adjust_height_point(final_mask, delta=-0.2)
+
+                            visualize_pcd_mask(image_path=None, orient_pcd=copy_pcd, mask_pcd=final_mask, target_point=xyz_cam, normal_vector=normal_vector)
                             
 
                         except Exception as e:
@@ -1323,6 +1234,7 @@ def run_and_export(output_csv: str, split) -> None:
             else:
                 rx, ry, rz = 0.0, 0.0, 1.0  # fallback
 
+            #rx, ry, rz = 0.0, 0.0, 1.0
             print('orient: ', [rx,ry,rz])
 
             # Compose CSV row
@@ -1354,7 +1266,7 @@ def run_and_export(output_csv: str, split) -> None:
 if __name__ == "__main__":
     
 
-    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submissions_3D.csv")
+    out_csv = os.path.join(os.path.dirname(__file__), "submit", "Submission_3D.csv")
     print(f"Saving to {out_csv}")
-    run_and_export(out_csv, split='train')
+    run_and_export(out_csv, split='test')
 
